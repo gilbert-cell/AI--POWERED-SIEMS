@@ -1,0 +1,122 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #fafafa;
+}
+
+.App {
+  min-height: 100vh;
+  background-color: #fafafa;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #888;
+}
+
+/* Typography */
+h1, h2, h3, h4, h5, h6 {
+  color: #1a237e;
+}
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+tbody tr:hover {
+  background-color: #f5f5f5 !important;
+}
+
+/* Cards */
+.MuiCard-root {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+  border-radius: 8px !important;
+}
+
+/* Buttons */
+.MuiButton-root {
+  text-transform: none;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+/* Chips */
+.MuiChip-root {
+  border-radius: 4px;
+}
+
+/* Dialogs */
+.MuiDialog-paper {
+  border-radius: 8px !important;
+}
+
+/* Input Fields */
+.MuiOutlinedInput-root {
+  border-radius: 6px;
+}
+
+.MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline {
+  border-color: #1a237e;
+}
+
+.MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline {
+  border-color: #1a237e;
+  border-width: 2px;
+}
+
+/* Alerts */
+.MuiAlert-root {
+  border-radius: 6px;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.3s ease-in;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+  .MuiContainer-root {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .MuiAppBar-root {
+    padding: 8px;
+  }
+}
+
