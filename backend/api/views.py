@@ -8,6 +8,154 @@ import re
 
 from .ai_model import load_dataset_to_logs, preview_dataset, predict_record, train_model, load_model_artifact, train_siem_model, train_isolation_forest, if_score_record
 
+def _safe_float(v):
+    try: return float(v)
+    except (TypeError, ValueError): return None
+
+def _safe_int(v):
+    try: return int(float(v))
+    except (TypeError, ValueError): return None
+
+# ── Normalized event type map ────────────────────────────────────────────────
+_ATTACK_CAT_TO_EVENT = {
+    'exploits': 'EXPLOIT_ATTEMPT', 'fuzzers': 'FUZZER', 'dos': 'DOS_ATTACK',
+    'ddos': 'DDOS_ATTACK', 'reconnaissance': 'RECONNAISSANCE', 'analysis': 'RECONNAISSANCE',
+    'backdoor': 'BACKDOOR', 'shellcode': 'SHELLCODE', 'worms': 'WORM',
+    'generic': 'GENERIC_ATTACK', 'normal': 'UNKNOWN',
+}
+
+# Normalized attack category per event type (used when attack_category is empty)
+_EVENT_TO_ATTACK_CAT = {
+    'LOGIN_FAILED':         'AUTH_ATTACK',
+    'LOGIN_SUCCESS':        'NORMAL',
+    'BRUTE_FORCE':          'AUTH_ATTACK',
+    'SQL_INJECTION':        'WEB_ATTACK',
+    'XSS_ATTACK':           'WEB_ATTACK',
+    'PORT_SCAN':            'RECONNAISSANCE',
+    'DDOS_ATTACK':          'DOS_ATTACK',
+    'DOS_ATTACK':           'DOS_ATTACK',
+    'FIREWALL_BLOCK':       'NETWORK_ATTACK',
+    'PRIVILEGE_ESCALATION': 'PRIVILEGE_ATTACK',
+    'MALWARE_ACTIVITY':     'MALWARE',
+    'EXPLOIT_ATTEMPT':      'EXPLOIT',
+    'BACKDOOR':             'INTRUSION',
+    'SHELLCODE':            'INTRUSION',
+    'RECONNAISSANCE':       'RECONNAISSANCE',
+    'WORM':                 'MALWARE',
+    'FUZZER':               'FUZZER',
+    'GENERIC_ATTACK':       'GENERIC',
+    'CONFIG_CHANGE':        'SYSTEM',
+    'FILE_ACCESS':          'SYSTEM',
+    'UNKNOWN':              'UNKNOWN',
+}
+
+# Severity upgrade rules: if anomaly_score >= threshold, upgrade severity
+_SEVERITY_UPGRADE = [
+    (0.9,  'CRITICAL'),
+    (0.75, 'HIGH'),
+    (0.45, 'MEDIUM'),
+    (0.0,  'LOW'),
+]
+_MSG_TO_EVENT = [
+    (re.compile(r'brute force|failed password attempt', re.I),       'BRUTE_FORCE'),
+    (re.compile(r'sql injection',                        re.I),       'SQL_INJECTION'),
+    (re.compile(r'xss|cross-site scripting',             re.I),       'XSS_ATTACK'),
+    (re.compile(r'privilege escalation|sudo:',           re.I),       'PRIVILEGE_ESCALATION'),
+    (re.compile(r'port scan|UFW BLOCK|DPT=',             re.I),       'PORT_SCAN'),
+    (re.compile(r'SYN flood|ddos|connection reset',      re.I),       'DDOS_ATTACK'),
+    (re.compile(r'malware signature',                    re.I),       'MALWARE_ACTIVITY'),
+    (re.compile(r'exploit',                              re.I),       'EXPLOIT_ATTEMPT'),
+    (re.compile(r'backdoor',                             re.I),       'BACKDOOR'),
+    (re.compile(r'shellcode',                            re.I),       'SHELLCODE'),
+    (re.compile(r'worm',                                 re.I),       'WORM'),
+    (re.compile(r'reconnaissance|recon',                 re.I),       'RECONNAISSANCE'),
+    (re.compile(r'authentication failure|login failed|invalid user', re.I), 'LOGIN_FAILED'),
+    (re.compile(r'authenticated successfully|login success',         re.I), 'LOGIN_SUCCESS'),
+    (re.compile(r'firewall block|blocked port',          re.I),       'FIREWALL_BLOCK'),
+    (re.compile(r'config modified',                      re.I),       'CONFIG_CHANGE'),
+    (re.compile(r'file accessed',                        re.I),       'FILE_ACCESS'),
+]
+_MSG_TO_SEVERITY = [
+    (re.compile(r'brute force|sql injection|shellcode|backdoor|malware|ddos|privilege escalation|exploit', re.I), 'critical'),
+    (re.compile(r'port scan|xss|worm|reconnaissance',    re.I),       'high'),
+    (re.compile(r'login failed|firewall block|config',   re.I),       'medium'),
+]
+_SERVICE_PORT = {'http': 80, 'https': 443, 'ftp': 21, 'ssh': 22, 'dns': 53, 'smtp': 25}
+
+_EVENT_DEFAULTS = {
+    'LOGIN_FAILED':         {'protocol': 'tcp', 'service': 'ssh',  'port': 22,   'state': 'SYN', 'duration': (0.1,  0.5),  'packets': (4,  8),  'bytes': (200,   600)},
+    'LOGIN_SUCCESS':        {'protocol': 'tcp', 'service': 'ssh',  'port': 22,   'state': 'FIN', 'duration': (0.05, 0.3),  'packets': (6,  12), 'bytes': (400,   900)},
+    'BRUTE_FORCE':          {'protocol': 'tcp', 'service': 'ssh',  'port': 22,   'state': 'SYN', 'duration': (0.01, 0.1),  'packets': (2,  6),  'bytes': (100,   400)},
+    'SQL_INJECTION':        {'protocol': 'tcp', 'service': 'http', 'port': 80,   'state': 'FIN', 'duration': (0.2,  1.5),  'packets': (8,  20), 'bytes': (800,  3000)},
+    'XSS_ATTACK':           {'protocol': 'tcp', 'service': 'http', 'port': 80,   'state': 'FIN', 'duration': (0.1,  0.8),  'packets': (6,  14), 'bytes': (500,  2000)},
+    'PORT_SCAN':            {'protocol': 'tcp', 'service': '-',    'port': 443,  'state': 'SYN', 'duration': (0.001,0.05), 'packets': (1,  3),  'bytes': (60,    200)},
+    'DDOS_ATTACK':          {'protocol': 'tcp', 'service': '-',    'port': 80,   'state': 'SYN', 'duration': (0.001,0.01), 'packets': (1,  4),  'bytes': (60,    300)},
+    'DOS_ATTACK':           {'protocol': 'udp', 'service': '-',    'port': 80,   'state': 'CON', 'duration': (0.001,0.02), 'packets': (1,  4),  'bytes': (60,    300)},
+    'FIREWALL_BLOCK':       {'protocol': 'tcp', 'service': '-',    'port': 443,  'state': 'SYN', 'duration': (0.001,0.05), 'packets': (1,  3),  'bytes': (60,    200)},
+    'PRIVILEGE_ESCALATION': {'protocol': 'tcp', 'service': 'ssh',  'port': 22,   'state': 'FIN', 'duration': (0.3,  2.0),  'packets': (10, 25), 'bytes': (1000, 4000)},
+    'MALWARE_ACTIVITY':     {'protocol': 'tcp', 'service': 'http', 'port': 80,   'state': 'FIN', 'duration': (1.0,  8.0),  'packets': (15, 40), 'bytes': (2000,10000)},
+    'EXPLOIT_ATTEMPT':      {'protocol': 'tcp', 'service': 'http', 'port': 80,   'state': 'FIN', 'duration': (0.5,  3.0),  'packets': (10, 25), 'bytes': (1500, 5000)},
+    'BACKDOOR':             {'protocol': 'tcp', 'service': '-',    'port': 4444, 'state': 'CON', 'duration': (5.0, 30.0),  'packets': (20, 60), 'bytes': (3000,15000)},
+    'SHELLCODE':            {'protocol': 'tcp', 'service': '-',    'port': 80,   'state': 'FIN', 'duration': (0.3,  2.0),  'packets': (10, 20), 'bytes': (1000, 4000)},
+    'RECONNAISSANCE':       {'protocol': 'tcp', 'service': '-',    'port': 443,  'state': 'SYN', 'duration': (0.01, 0.2),  'packets': (2,  8),  'bytes': (100,   500)},
+    'WORM':                 {'protocol': 'tcp', 'service': '-',    'port': 445,  'state': 'SYN', 'duration': (0.5,  5.0),  'packets': (10, 30), 'bytes': (1000, 8000)},
+    'FUZZER':               {'protocol': 'udp', 'service': '-',    'port': 80,   'state': 'INT', 'duration': (0.01, 0.1),  'packets': (2,  6),  'bytes': (100,   400)},
+    'GENERIC_ATTACK':       {'protocol': 'tcp', 'service': '-',    'port': 80,   'state': 'FIN', 'duration': (0.2,  2.0),  'packets': (6,  18), 'bytes': (500,  3000)},
+    'CONFIG_CHANGE':        {'protocol': 'tcp', 'service': 'ssh',  'port': 22,   'state': 'FIN', 'duration': (0.1,  0.5),  'packets': (4,  10), 'bytes': (300,   800)},
+    'FILE_ACCESS':          {'protocol': 'tcp', 'service': 'ftp',  'port': 21,   'state': 'FIN', 'duration': (0.05, 0.3),  'packets': (4,  10), 'bytes': (200,   600)},
+}
+
+
+def parse_message(msg):
+    """Extract structured fields from a pipe-delimited UNSW-NB15 style message."""
+    data = {}
+    if not msg:
+        return data
+    for part in msg.split('|'):
+        part = part.strip()
+        if ':' in part:
+            k, v = part.split(':', 1)
+            data[k.strip().lower().replace(' ', '_')] = v.strip()
+    return data
+
+
+def normalize_event_type(message, attack_category='', level='INFO'):
+    """Return a normalized EVENT_TYPE string from message content."""
+    cat = (attack_category or '').lower().strip()
+    if cat and cat in _ATTACK_CAT_TO_EVENT:
+        return _ATTACK_CAT_TO_EVENT[cat]
+    for pattern, etype in _MSG_TO_EVENT:
+        if pattern.search(message or ''):
+            return etype
+    return 'LOGIN_SUCCESS' if level == 'INFO' else 'UNKNOWN'
+
+
+def normalize_severity(message, level='INFO', attack_category=''):
+    """Return LOW/MEDIUM/HIGH/CRITICAL (uppercase) from message + level."""
+    msg = (message or '').lower()
+    if any(k in msg for k in ['login success', 'authenticated successfully', 'file accessed']):
+        return 'LOW'
+    for pattern, sev in _MSG_TO_SEVERITY:
+        if pattern.search(message or ''):
+            return sev.upper()
+    return {'INFO': 'LOW', 'WARNING': 'MEDIUM', 'ERROR': 'HIGH', 'CRITICAL': 'CRITICAL'}.get(level.upper(), 'LOW')
+
+
+def normalize_attack_category(event_type, raw_category=''):
+    """Return a normalized attack category string."""
+    raw = (raw_category or '').lower().strip()
+    # Map raw UNSW-NB15 categories to normalized form
+    _RAW_MAP = {
+        'exploits': 'EXPLOIT', 'fuzzers': 'FUZZER', 'dos': 'DOS_ATTACK',
+        'ddos': 'DOS_ATTACK', 'reconnaissance': 'RECONNAISSANCE', 'analysis': 'RECONNAISSANCE',
+        'backdoor': 'INTRUSION', 'shellcode': 'INTRUSION', 'worms': 'MALWARE',
+        'generic': 'GENERIC', 'normal': 'NORMAL',
+    }
+    if raw and raw in _RAW_MAP:
+        return _RAW_MAP[raw]
+    return _EVENT_TO_ATTACK_CAT.get(event_type, 'UNKNOWN')
+
+
 SOURCE_LOG_TEMPLATES = {
     'network': [
         {'event_type': 'Generic Attack', 'severity': 'high', 'message': 'Generic attack pattern detected over TCP (UNSW-NB15).'},
@@ -149,26 +297,14 @@ def get_real_logs_from_db(limit=100):
     logs = Log.objects.all().order_by('-timestamp')[:limit]
     if not logs:
         return get_sample_logs()
-    
+
     result = []
     for log in logs:
-        severity = 'high' if log.level in ['ERROR', 'CRITICAL'] else 'medium' if log.level == 'WARNING' else 'low'
-        # Check if this log has been marked as a false positive
         is_false_positive = hasattr(log, 'anomaly') and log.anomaly.status == 'false_positive'
-        result.append({
-            'id': log.id,
-            'source': log.source,
-            'source_ip': '127.0.0.1',
-            'destination_ip': '127.0.0.1',
-            'event_type': log.level,
-            'severity': severity,
-            'message': log.message,
-            'timestamp': log.timestamp.isoformat(),
-            'raw_data': {'protocol': 'UNSW_NB15', 'port': None},
-            'metadata': {'source_system': log.source, 'host': 'siem-system'},
-            'duplicate': False,
-            'false_positive': is_false_positive,
-        })
+        anomaly = getattr(log, 'anomaly', None)
+        entry = build_log_payload(log, anomaly)
+        entry['false_positive'] = is_false_positive
+        result.append(entry)
     return result
 
 
@@ -223,66 +359,117 @@ def _ml_score_log(log_message, log_level, source=''):
         return None
 
 
-def score_log_anomaly(log_message, log_level, source=''):
-    """Score a log entry combining regex patterns + ML model."""
-    score = 0.0
+def score_log_anomaly(log_message, log_level, source='', record=None):
+    """
+    Hybrid anomaly scorer: Isolation Forest (unsupervised) + Random Forest (supervised).
+    Returns dict with combined score, individual scores, and reasons.
+    """
+    record = record or {}
     reasons = []
-    normalized = log_message or ''
 
+    # ── 1. Pattern / rule-based baseline ──
+    pattern_score = 0.0
     for pattern, label, weight in ANOMALY_PATTERNS:
-        if pattern.search(normalized):
-            score = max(score, weight)
+        if pattern.search(log_message or ''):
+            pattern_score = max(pattern_score, weight)
             reasons.append(label)
-
-    if log_level and log_level.upper() in ['ALERT', 'ERROR', 'CRITICAL']:
-        score = max(score, 0.75)
+    if log_level and log_level.upper() in ['ERROR', 'CRITICAL']:
+        pattern_score = max(pattern_score, 0.75)
         if 'High severity event' not in reasons:
             reasons.append('High severity event')
 
-    # Blend with Random Forest ML score
-    ml_score = _ml_score_log(log_message, log_level, source)
-    if ml_score is not None:
-        score = round(0.5 * ml_score + 0.4 * score, 2)
-        if ml_score >= 0.7 and 'ML Threat Detection' not in reasons:
-            reasons.append('ML Threat Detection')
+    # ── 2. Random Forest (supervised, trained on UNSW-NB15 labels) ──
+    rf_score = 0.0
+    ml_result = _ml_score_log(log_message, log_level, source)
+    if ml_result is not None:
+        rf_score = ml_result
+        if rf_score >= 0.7 and 'Random Forest' not in reasons:
+            reasons.append('Random Forest')
 
-    # Blend with Isolation Forest score (unsupervised, trained on UNSW-NB15)
-    record = {
-        'event_type_code': next((v for k, v in _EVENT_TYPE_MAP.items() if re.search(k, log_message or '', re.I)), 0),
-        'severity_code': _SEVERITY_MAP.get((log_level or '').upper(), 0),
-        'source_code': _SOURCE_MAP.get((source or '').lower(), -1),
-        'msg_len': len(log_message or ''),
+    # ── 3. Isolation Forest (unsupervised, uses real ML features) ──
+    if_score = 0.0
+    if_record = {
+        'duration':     record.get('duration'),
+        'packets_sent': record.get('packets_sent'),
+        'bytes_sent':   record.get('bytes_sent'),
     }
-    if_score = if_score_record(record)
-    if if_score is not None:
-        score = round(min(score + 0.1 * if_score, 1.0), 2)
-        if if_score >= 0.75 and 'Isolation Forest' not in reasons:
-            reasons.append('Isolation Forest')
+    if any(v is not None for v in if_record.values()):
+        raw_if = if_score_record(if_record)
+        if raw_if is not None:
+            if_score = raw_if
+            if if_score >= 0.6 and 'Isolation Forest' not in reasons:
+                reasons.append('Isolation Forest')
+
+    # ── 4. Correlated hybrid score ──
+    # Weights: RF=40%, IF=35%, pattern=25%
+    # Boost: if both RF and IF agree (both >= 0.6), multiply by 1.15
+    hybrid = round(0.40 * rf_score + 0.35 * if_score + 0.25 * pattern_score, 3)
+    if rf_score >= 0.6 and if_score >= 0.6:
+        hybrid = round(min(hybrid * 1.15, 1.0), 3)
+        if 'Correlated Detection' not in reasons:
+            reasons.append('Correlated Detection')
+
+    # ── 5. Severity-based floor ──
+    # XSS + anomaly_score > 0.85 + packets > 5 → CRITICAL (as recommended)
+    event_type = normalize_event_type(log_message, '', log_level)
+    if (event_type in ('XSS_ATTACK', 'SQL_INJECTION', 'EXPLOIT_ATTEMPT')
+            and hybrid >= 0.85
+            and record.get('packets_sent', 0) and record.get('packets_sent', 0) > 5):
+        hybrid = max(hybrid, 0.92)
+        if 'Correlated Web Attack' not in reasons:
+            reasons.append('Correlated Web Attack')
 
     return {
-        'score': score,
-        'types': reasons or ['baseline'],
-        'reason': '; '.join(reasons) if reasons else 'No strong anomaly signal'
+        'score':    round(min(hybrid, 1.0), 3),
+        'if_score': round(if_score, 3),
+        'rf_score': round(rf_score, 3),
+        'types':    reasons or ['baseline'],
+        'reason':   '; '.join(reasons) if reasons else 'No strong anomaly signal',
     }
 
 
 def build_log_payload(log, anomaly=None):
+    parsed = parse_message(log.message)
+    # Upgrade severity based on anomaly score
+    severity = (log.severity or 'LOW').upper()
+    if anomaly and anomaly.score:
+        for threshold, upgraded in _SEVERITY_UPGRADE:
+            if anomaly.score >= threshold:
+                # Only upgrade, never downgrade
+                order = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+                if order.index(upgraded) > order.index(severity):
+                    severity = upgraded
+                break
     payload = {
         'id': log.id,
         'source': log.source,
-        'source_ip': '127.0.0.1',
-        'destination_ip': '127.0.0.1',
-        'event_type': log.level,
-        'severity': 'low' if log.level == 'INFO' else 'medium' if log.level == 'WARNING' else 'high',
+        'source_ip': str(log.src_ip) if log.src_ip else parsed.get('src', '127.0.0.1'),
+        'destination_ip': str(log.dst_ip) if log.dst_ip else parsed.get('dst', '127.0.0.1'),
+        'event_type': log.event_type,
+        'severity': severity,
+        'attack_category': log.attack_category or normalize_attack_category(log.event_type),
         'message': log.message,
         'timestamp': log.timestamp.isoformat(),
         'raw_data': {
-            'protocol': 'LOCAL',
-            'port': None,
+            'protocol': log.protocol or parsed.get('protocol', ''),
+            'service':  log.service  or parsed.get('service', ''),
+            'state':    log.state    or parsed.get('state', ''),
+            'port':     log.port,
+        },
+        'features': {
+            'duration':     log.duration,
+            'packets_sent': log.packets_sent,
+            'bytes_sent':   log.bytes_sent,
+        },
+        'ml_scores': {
+            'anomaly_score': log.anomaly_score,
+            'if_score':      log.if_score,
+            'rf_score':      log.rf_score,
         },
         'metadata': {
             'source_system': log.source,
             'host': 'ubuntu',
+            'level': log.level,
         },
         'duplicate': False,
         'false_positive': False,
@@ -303,7 +490,15 @@ def run_anomaly_detection_for_logs(logs, source=None):
     anomalies = []
 
     for log in logs:
-        result = score_log_anomaly(log.message or '', log.level, log.source)
+        result = score_log_anomaly(log.message or '', log.level, log.source, record={
+            'duration': log.duration, 'packets_sent': log.packets_sent, 'bytes_sent': log.bytes_sent,
+        })
+        # Auto-insert scores into PostgreSQL logs table
+        log.anomaly_score = result['score']
+        log.if_score      = result['if_score']
+        log.rf_score      = result['rf_score']
+        log.save(update_fields=['anomaly_score', 'if_score', 'rf_score'])
+
         if result['score'] >= 0.45:
             anomaly, _ = Anomaly.objects.update_or_create(
                 log=log,
@@ -439,7 +634,16 @@ def logs_list(request):
     page_size = int(request.GET.get('page_size', 10))
     duplicates = request.GET.get('duplicates', 'false').lower() == 'true'
     source_filter = request.GET.get('source')
+    severity_filter = request.GET.get('severity', '').lower()
     query = request.GET.get('q', '').strip().lower()
+
+    # Map severity filter to database log levels
+    severity_map = {
+        'critical': 'CRITICAL',
+        'high': 'ERROR',
+        'medium': 'WARNING',
+        'low': 'INFO',
+    }
 
     logs_queryset = Log.objects.all().order_by('-timestamp')
     
@@ -450,6 +654,8 @@ def logs_list(request):
         # Apply filters to sample logs
         if source_filter:
             sample_logs = [log for log in sample_logs if log['source'].lower() == source_filter.lower()]
+        if severity_filter and severity_filter in severity_map:
+            sample_logs = [log for log in sample_logs if log['severity'].lower() == severity_filter.lower()]
         if query:
             sample_logs = [log for log in sample_logs if 
                           query in log['message'].lower() or 
@@ -470,6 +676,8 @@ def logs_list(request):
     
     if source_filter:
         logs_queryset = logs_queryset.filter(source=source_filter.lower())
+    if severity_filter and severity_filter in severity_map:
+        logs_queryset = logs_queryset.filter(level=severity_map[severity_filter])
     if duplicates:
         # For now, just return all - we can implement duplicate detection later
         pass
@@ -505,10 +713,13 @@ def logs_search(request):
     page = int(request.GET.get('page', 1))
     page_size = int(request.GET.get('page_size', 10))
     source_filter = request.GET.get('source')
+    severity_filter = request.GET.get('severity', '').lower()
 
     logs = get_real_logs_from_db(limit=5000)
     if source_filter:
         logs = [log for log in logs if log['source'].lower() == source_filter.lower()]
+    if severity_filter:
+        logs = [log for log in logs if log.get('severity', '').lower() == severity_filter]
 
     if query:
         logs = [
@@ -550,17 +761,75 @@ def remove_duplicate(request):
 @require_http_methods(["POST"])
 @csrf_exempt
 def create_log(request):
-    """Create a new log entry and immediately run anomaly detection on it"""
+    """Create a new log entry with structured fields and run anomaly detection."""
     try:
         from .models import Log, Anomaly
         data = json.loads(request.body)
+        msg     = data.get('message', '')
+        level   = data.get('level', 'INFO')
+        source  = data.get('source', '')
+        parsed  = parse_message(msg)
+        cat     = data.get('attack_category', parsed.get('attack_category', ''))
+        etype   = normalize_event_type(msg, cat, level)
+        sev     = normalize_severity(msg, level, cat)
+        att_cat = normalize_attack_category(etype, cat)
+        defs    = _EVENT_DEFAULTS.get(etype, {})
+
+        # Extract src/dst IPs from message if not provided
+        import re as _re
+        _SRC = _re.compile(r'src=(\d+\.\d+\.\d+\.\d+)')
+        _DST = _re.compile(r'dst=(\d+\.\d+\.\d+\.\d+)')
+        _DPT = _re.compile(r'DPT=(\d+)')
+        src_match = _SRC.search(msg)
+        dst_match = _DST.search(msg)
+        dpt_match = _DPT.search(msg)
+
+        proto   = data.get('protocol') or parsed.get('protocol') or defs.get('protocol', '')
+        service = data.get('service')  or parsed.get('service')  or defs.get('service', '')
+        state   = data.get('state')    or parsed.get('state')    or defs.get('state', '')
+        port    = (data.get('port')
+                   or _safe_int(parsed.get('port'))
+                   or (int(dpt_match.group(1)) if dpt_match else None)
+                   or _SERVICE_PORT.get((service or '').lower())
+                   or defs.get('port'))
+        src_ip  = data.get('src_ip') or (src_match.group(1) if src_match else None)
+        dst_ip  = data.get('dst_ip') or (dst_match.group(1) if dst_match else None)
+
+        duration    = data.get('duration') or _safe_float(parsed.get('duration'))
+        packets_sent = data.get('packets_sent') or _safe_int(parsed.get('packets_sent'))
+        bytes_sent   = data.get('bytes_sent') or _safe_int(parsed.get('bytes_sent'))
+        if duration is None and defs:
+            import random as _rnd
+            duration     = round(_rnd.uniform(*defs['duration']), 6)
+            packets_sent = _rnd.randint(*defs['packets'])
+            bytes_sent   = _rnd.randint(*defs['bytes'])
+
         log = Log.objects.create(
-            source=data.get('source'),
-            message=data.get('message'),
-            level=data.get('level', 'INFO')
+            source       = source,
+            message      = msg,
+            level        = level,
+            event_type   = etype,
+            severity     = sev,
+            attack_category = att_cat,
+            protocol     = proto,
+            service      = service,
+            state        = state,
+            src_ip       = src_ip or None,
+            dst_ip       = dst_ip or None,
+            port         = port,
+            duration     = duration,
+            packets_sent = packets_sent,
+            bytes_sent   = bytes_sent,
         )
-        # Run anomaly detection immediately on the new log
-        result = score_log_anomaly(log.message or '', log.level, log.source)
+        result = score_log_anomaly(log.message or '', log.level, log.source, record={
+            'duration': log.duration, 'packets_sent': log.packets_sent, 'bytes_sent': log.bytes_sent,
+        })
+        # Auto-insert scores directly into the logs table (no join needed for rule engine)
+        log.anomaly_score = result['score']
+        log.if_score      = result['if_score']
+        log.rf_score      = result['rf_score']
+        log.save(update_fields=['anomaly_score', 'if_score', 'rf_score'])
+
         anomaly_detected = False
         if result['score'] >= 0.45:
             Anomaly.objects.update_or_create(
@@ -573,11 +842,13 @@ def create_log(request):
             )
             anomaly_detected = True
         return JsonResponse({
-            "status": "saved",
-            "id": log.id,
-            "anomaly_detected": anomaly_detected,
-            "anomaly_score": result['score'],
-            "anomaly_type": result['types'][0] if anomaly_detected else None,
+            'status': 'saved',
+            'id': log.id,
+            'event_type': log.event_type,
+            'severity': log.severity,
+            'anomaly_detected': anomaly_detected,
+            'anomaly_score': result['score'],
+            'anomaly_type': result['types'][0] if anomaly_detected else None,
         })
     except Exception as e:
         return JsonResponse({'status': 'error', 'message': str(e)}, status=400)
@@ -900,13 +1171,18 @@ def ai_advanced_decisions(request):
         'baseline': 'MONITOR',
     }
 
-    anomalies = Anomaly.objects.select_related('log').order_by('-created_at')[:100]
+    all_anomalies = Anomaly.objects.select_related('log').order_by('-created_at')
+    total_count = all_anomalies.count()
 
-    rows = []
+    # Build attack_counts from ALL anomalies, rows from latest 100
     attack_counts = {}
-    for a in anomalies:
+    for a in all_anomalies:
         atype = a.anomaly_type or 'baseline'
         attack_counts[atype] = attack_counts.get(atype, 0) + 1
+
+    rows = []
+    for a in all_anomalies[:100]:
+        atype = a.anomaly_type or 'baseline'
         rows.append({
             'id': a.id,
             'timestamp': a.log.timestamp.isoformat(),
@@ -935,11 +1211,12 @@ def ai_advanced_decisions(request):
                          'attack_type': atype, 'action': action, 'remediation': rem,
                          'score': score, 'source': src})
             attack_counts[atype] = attack_counts.get(atype, 0) + 1
+        total_count = len(rows)
 
     return JsonResponse({
         'results': rows,
         'attack_counts': dict(sorted(attack_counts.items(), key=lambda x: x[1], reverse=True)),
-        'total': len(rows),
+        'total': total_count,
     })
 
 
@@ -963,10 +1240,18 @@ def ai_override_decision(request, decision_id):
 def ai_accuracy(request):
     """Live confusion matrix and accuracy metrics from DB anomalies."""
     from .models import Anomaly, Log
+    from django.db.models import Q
     total_logs = Log.objects.count()
     anomalies = Anomaly.objects.all()
-    tp = anomalies.filter(score__gte=0.6).count()
-    fp = anomalies.filter(score__lt=0.6, score__gte=0.45).count()
+
+    # Real false positives: marked as false_positive OR INFO-level logs that got flagged
+    fp = Anomaly.objects.filter(
+        Q(status='false_positive') | Q(log__level='INFO')
+    ).distinct().count()
+
+    tp = anomalies.filter(score__gte=0.6).exclude(
+        Q(status='false_positive') | Q(log__level='INFO')
+    ).count()
     fn = max(0, int(total_logs * 0.03) - fp)
     tn = max(0, total_logs - tp - fp - fn)
 
@@ -1109,6 +1394,17 @@ def run_anomaly_detection(request):
         ]
     })
 
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def realtime_pipeline(request):
+    """
+    Real-time AI pipeline endpoint.
+    Accepts a log, runs hybrid IF+RF scoring, saves scores to DB, triggers alerts.
+    Pipeline: Log → Parse → Normalize → IF score → RF score → Hybrid → DB → Alert
+    """
+    return create_log(request)
+
 @require_http_methods(["POST"])
 def mark_anomaly_false_positive(request, anomaly_id):
     """Mark an anomaly as a false positive"""
@@ -1168,6 +1464,7 @@ def _rule_to_dict(rule):
         'severity': rule.severity,
         'action': rule.action,
         'enabled': rule.enabled,
+        'time_window': rule.time_window,
         'created_at': rule.created_at.isoformat(),
         'updated_at': rule.updated_at.isoformat(),
     }
@@ -1209,6 +1506,7 @@ def rules_list(request):
             severity=data.get('severity', 'medium'),
             action=data.get('action', 'alert'),
             enabled=data.get('enabled', True),
+            time_window=int(data.get('time_window', 0)),
         )
         return JsonResponse(_rule_to_dict(rule), status=201)
     except Exception as e:
@@ -1234,13 +1532,88 @@ def rule_detail(request, rule_id):
     # PUT / PATCH — update
     try:
         data = json.loads(request.body)
-        for field in ('name', 'description', 'rule_type', 'condition', 'severity', 'action', 'enabled'):
+        for field in ('name', 'description', 'rule_type', 'condition', 'severity', 'action', 'enabled', 'time_window'):
             if field in data:
                 setattr(rule, field, data[field])
         rule.save()
         return JsonResponse(_rule_to_dict(rule))
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=400)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def rules_reset(request):
+    """Reset all rules to clean, correct defaults."""
+    from .models import Rule
+    Rule.objects.all().delete()
+    defaults = [
+        {
+            'name': 'AI Anomaly Detection',
+            'description': 'Trigger alert when ML anomaly score exceeds 0.8 — primary AI-driven detection rule.',
+            'rule_type': 'ml',
+            'condition': 'anomaly_score > 0.8',
+            'severity': 'high',
+            'action': 'alert',
+            'enabled': True,
+            'time_window': 0,
+        },
+        {
+            'name': 'Brute Force Detection',
+            'description': 'Alert when more than 5 failed logins from the same IP occur within 5 minutes.',
+            'rule_type': 'behavior',
+            'condition': 'count(event_type == "Login Failed" AND same src_ip) > 5',
+            'severity': 'high',
+            'action': 'alert',
+            'enabled': True,
+            'time_window': 5,
+        },
+        {
+            'name': 'SQL Injection Detected',
+            'description': 'Block immediately when SQL injection pattern is found in log message.',
+            'rule_type': 'pattern',
+            'condition': '"sql injection" in message.lower()',
+            'severity': 'critical',
+            'action': 'block',
+            'enabled': True,
+            'time_window': 0,
+        },
+        {
+            'name': 'Port Scan Detection',
+            'description': 'Alert when more than 10 unique ports are scanned by the same IP within 1 minute.',
+            'rule_type': 'behavior',
+            'condition': 'count(unique_ports from same src_ip) > 10',
+            'severity': 'medium',
+            'action': 'alert',
+            'enabled': True,
+            'time_window': 1,
+        },
+        {
+            'name': 'Privilege Escalation',
+            'description': 'Alert on any sudo or privilege escalation attempt.',
+            'rule_type': 'pattern',
+            'condition': '"privilege escalation" in message.lower() OR "sudo:" in message',
+            'severity': 'critical',
+            'action': 'alert',
+            'enabled': True,
+            'time_window': 0,
+        },
+        {
+            'name': 'Anomaly Score Threshold Breach',
+            'description': 'Escalate to block when anomaly score exceeds 0.95 (critical confidence).',
+            'rule_type': 'threshold',
+            'condition': 'anomaly_score > 0.95',
+            'severity': 'critical',
+            'action': 'block',
+            'enabled': True,
+            'time_window': 0,
+        },
+    ]
+    created = []
+    for d in defaults:
+        r = Rule.objects.create(**d)
+        created.append(_rule_to_dict(r))
+    return JsonResponse({'status': 'reset', 'results': created})
 
 
 @csrf_exempt

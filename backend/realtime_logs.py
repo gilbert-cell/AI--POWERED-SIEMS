@@ -9,19 +9,20 @@ from pathlib import Path
 import requests
 
 # Simulated events — keywords match ANOMALY_PATTERNS in views.py
+# Each event has a fixed severity and level — no random assignment
 EVENTS = [
-    {"type": "Login Failed",         "category": "auth",     "keyword": "authentication failure for user"},
-    {"type": "Brute Force",           "category": "auth",     "keyword": "failed password attempt invalid user"},
-    {"type": "Port Scan",             "category": "network",  "keyword": "UFW BLOCK DPT=22 SYN flood detected"},
-    {"type": "Privilege Escalation",  "category": "security", "keyword": "sudo: privilege escalation attempt"},
-    {"type": "SQL Injection",         "category": "web",      "keyword": "sql injection attempt detected in query"},
-    {"type": "XSS Attack",            "category": "web",      "keyword": "xss cross-site scripting payload blocked"},
-    {"type": "DDoS Attack",           "category": "network",  "keyword": "UFW BLOCK connection reset SYN flood"},
-    {"type": "Malware Activity",      "category": "security", "keyword": "failed login malware signature match"},
-    {"type": "Firewall Block",        "category": "network",  "keyword": "blocked port scan DPT=443"},
-    {"type": "Login Success",         "category": "auth",     "keyword": "user authenticated successfully"},
-    {"type": "File Access",           "category": "file",     "keyword": "file accessed by process"},
-    {"type": "Config Change",         "category": "system",   "keyword": "config modified by admin"},
+    {"type": "Login Failed",         "category": "auth",     "keyword": "authentication failure for user",        "severity": "Medium",   "level": "WARNING"},
+    {"type": "Brute Force",           "category": "auth",     "keyword": "failed password attempt invalid user",   "severity": "Critical",  "level": "CRITICAL"},
+    {"type": "Port Scan",             "category": "network",  "keyword": "UFW BLOCK DPT=22 SYN flood detected",   "severity": "High",     "level": "ERROR"},
+    {"type": "Privilege Escalation",  "category": "security", "keyword": "sudo: privilege escalation attempt",    "severity": "Critical",  "level": "CRITICAL"},
+    {"type": "SQL Injection",         "category": "web",      "keyword": "sql injection attempt detected in query","severity": "Critical",  "level": "CRITICAL"},
+    {"type": "XSS Attack",            "category": "web",      "keyword": "xss cross-site scripting payload blocked","severity": "High",     "level": "ERROR"},
+    {"type": "DDoS Attack",           "category": "network",  "keyword": "UFW BLOCK connection reset SYN flood",   "severity": "Critical",  "level": "CRITICAL"},
+    {"type": "Malware Activity",      "category": "security", "keyword": "failed login malware signature match",   "severity": "Critical",  "level": "CRITICAL"},
+    {"type": "Firewall Block",        "category": "network",  "keyword": "blocked port scan DPT=443",              "severity": "Medium",   "level": "WARNING"},
+    {"type": "Login Success",         "category": "auth",     "keyword": "user authenticated successfully",        "severity": "Low",      "level": "INFO"},
+    {"type": "File Access",           "category": "file",     "keyword": "file accessed by process",               "severity": "Low",      "level": "INFO"},
+    {"type": "Config Change",         "category": "system",   "keyword": "config modified by admin",               "severity": "Medium",   "level": "WARNING"},
 ]
 
 SEVERITY_LEVELS = ["Low", "Medium", "High", "Critical"]
@@ -55,26 +56,25 @@ DEST_IPS = [
 
 
 def generate_log():
-    """Generate a simulated security event"""
+    """Generate a simulated security event with correct severity per event type"""
     event = random.choice(EVENTS)
-    severity = random.choice(SEVERITY_LEVELS)
     source = random.choice(SOURCES)
     src_ip = random.choice(SOURCE_IPS)
     dst_ip = random.choice(DEST_IPS)
-    
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Construct log message
+
     message = (
         f"[{event['category'].upper()}] {event['type']} - "
         f"{event['keyword']} | "
         f"src={src_ip} dst={dst_ip} "
     )
-    
+
     return {
         'timestamp': timestamp,
         'event_type': event['type'],
-        'severity': severity,
+        'severity': event['severity'],
+        'level': event['level'],
         'source': source,
         'message': message,
         'category': event['category'],
@@ -83,13 +83,11 @@ def generate_log():
 
 def send_to_siem(log, api_url="http://localhost:8000/api/logs/create/"):
     """Send log to SIEM API"""
-    # Map simulator severity to Django log levels that trigger anomaly scoring
-    level_map = {"Low": "INFO", "Medium": "WARNING", "High": "ERROR", "Critical": "CRITICAL"}
     try:
         data = {
             "message": log['message'],
             "source": log['source'],
-            "level": level_map.get(log['severity'], 'INFO'),
+            "level": log['level'],
         }
         response = requests.post(api_url, json=data, timeout=2)
         return response.status_code in (200, 201)

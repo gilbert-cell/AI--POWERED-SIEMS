@@ -22,7 +22,7 @@ const SEVERITY_COLORS = {
 
 const RULE_DEFAULTS = {
   name: '', description: '', enabled: true,
-  rule_type: 'pattern', condition: '', severity: 'medium', action: 'alert',
+  rule_type: 'pattern', condition: '', severity: 'medium', action: 'alert', time_window: 0,
 };
 
 const THRESHOLD_DEFAULTS = {
@@ -58,6 +58,7 @@ const RulesTab = () => {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(RULE_DEFAULTS);
   const [saving, setSaving] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   const fetchRules = useCallback(async () => {
     setLoading(true);
@@ -107,6 +108,20 @@ const RulesTab = () => {
     }
   };
 
+  const handleReset = async () => {
+    if (!window.confirm('Reset all rules to system defaults? This will delete existing rules.')) return;
+    setResetting(true);
+    try {
+      await rulesService.resetRules();
+      toast.success('Rules reset to defaults');
+      fetchRules();
+    } catch {
+      toast.error('Failed to reset rules');
+    } finally {
+      setResetting(false);
+    }
+  };
+
   const handleToggle = async (id) => {
     try {
       const res = await rulesService.toggleRule(id);
@@ -127,6 +142,10 @@ const RulesTab = () => {
         </Typography>
         <Box sx={{ display: 'flex', gap: 1 }}>
           <Tooltip title="Refresh"><IconButton onClick={fetchRules} size="small"><RefreshIcon /></IconButton></Tooltip>
+          <Button variant="outlined" startIcon={<ResetIcon />} onClick={handleReset}
+            disabled={resetting} size="small" color="warning">
+            Reset Defaults
+          </Button>
           <Button variant="contained" startIcon={<AddIcon />} onClick={openAdd}
             sx={{ backgroundColor: '#1a237e' }}>
             Add Rule
@@ -143,7 +162,7 @@ const RulesTab = () => {
               <Table size="small">
                 <TableHead sx={{ backgroundColor: '#1a237e' }}>
                   <TableRow>
-                    {['Rule Name', 'Type', 'Severity', 'Action', 'Condition', 'Status', 'Actions'].map((h) => (
+                    {['Rule Name', 'Type', 'Severity', 'Action', 'Condition', 'Time Window', 'Status', 'Actions'].map((h) => (
                       <TableCell key={h} sx={{ color: 'white', fontWeight: 'bold', py: 1.5 }}>{h}</TableCell>
                     ))}
                   </TableRow>
@@ -151,8 +170,8 @@ const RulesTab = () => {
                 <TableBody>
                   {rules.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={7} align="center" sx={{ py: 4, color: '#999' }}>
-                        No rules configured. Click "Add Rule" to create one.
+                      <TableCell colSpan={8} align="center" sx={{ py: 4, color: '#999' }}>
+                        No rules configured. Click "Reset Defaults" to load system defaults.
                       </TableCell>
                     </TableRow>
                   ) : rules.map((rule) => (
@@ -177,6 +196,11 @@ const RulesTab = () => {
                           display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {rule.condition || '—'}
                         </Typography>
+                      </TableCell>
+                      <TableCell>
+                        {rule.time_window > 0
+                          ? <Chip label={`${rule.time_window} min`} size="small" sx={{ backgroundColor: '#e8eaf6', color: '#1a237e' }} />
+                          : <Typography variant="caption" color="textSecondary">—</Typography>}
                       </TableCell>
                       <TableCell>
                         <Tooltip title={rule.enabled ? 'Click to disable' : 'Click to enable'}>
@@ -239,7 +263,7 @@ const RulesTab = () => {
           </Box>
           <TextField label="Condition" fullWidth multiline rows={3}
             value={form.condition} onChange={f('condition')}
-            placeholder='e.g. source_ip == "192.168.1.1" AND event_type == "login_failed"'
+            placeholder='e.g. anomaly_score > 0.8'
             InputProps={{ sx: { fontFamily: 'monospace', fontSize: '0.85rem' } }} />
           <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
             <FormControl fullWidth>
@@ -251,10 +275,16 @@ const RulesTab = () => {
                 <MenuItem value="log">Log Only</MenuItem>
               </Select>
             </FormControl>
+            <TextField label="Time Window (min)" type="number" fullWidth
+              value={form.time_window}
+              onChange={(e) => setForm((p) => ({ ...p, time_window: Math.max(0, Number(e.target.value)) }))}
+              helperText="0 = no time window" />
+          </Box>
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
             <FormControlLabel
               control={<Switch checked={form.enabled}
                 onChange={(e) => setForm((p) => ({ ...p, enabled: e.target.checked }))} />}
-              label="Enabled" sx={{ minWidth: 110 }} />
+              label="Enabled" />
           </Box>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>

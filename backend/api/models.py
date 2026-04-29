@@ -1,13 +1,49 @@
 from django.db import models
 
 class Log(models.Model):
-    timestamp = models.DateTimeField(auto_now_add=True)
-    source = models.CharField(max_length=50)
-    message = models.TextField()
-    level = models.CharField(max_length=20, default='INFO')
+    SEVERITY_CHOICES = [('LOW','Low'),('MEDIUM','Medium'),('HIGH','High'),('CRITICAL','Critical')]
+    EVENT_TYPE_CHOICES = [
+        ('LOGIN_SUCCESS','Login Success'), ('LOGIN_FAILED','Login Failed'),
+        ('BRUTE_FORCE','Brute Force'), ('SQL_INJECTION','SQL Injection'),
+        ('XSS_ATTACK','XSS Attack'), ('PORT_SCAN','Port Scan'),
+        ('PRIVILEGE_ESCALATION','Privilege Escalation'), ('EXPLOIT_ATTEMPT','Exploit Attempt'),
+        ('MALWARE_ACTIVITY','Malware Activity'), ('DDOS_ATTACK','DDoS Attack'),
+        ('FIREWALL_BLOCK','Firewall Block'), ('RECONNAISSANCE','Reconnaissance'),
+        ('BACKDOOR','Backdoor'), ('SHELLCODE','Shellcode'),
+        ('FUZZER','Fuzzer'), ('WORM','Worm'),
+        ('DOS_ATTACK','DoS Attack'), ('CONFIG_CHANGE','Config Change'),
+        ('FILE_ACCESS','File Access'), ('GENERIC_ATTACK','Generic Attack'), ('UNKNOWN','Unknown'),
+    ]
+
+    # Core fields
+    timestamp   = models.DateTimeField(auto_now_add=True)
+    source      = models.CharField(max_length=100)
+    message     = models.TextField()
+    level       = models.CharField(max_length=20, default='INFO')   # Django log level (INFO/WARNING/ERROR/CRITICAL)
+
+    # Structured fields — ML-ready
+    event_type      = models.CharField(max_length=30, choices=EVENT_TYPE_CHOICES, default='UNKNOWN')
+    severity        = models.CharField(max_length=10, choices=SEVERITY_CHOICES, default='low')
+    attack_category = models.CharField(max_length=50, blank=True, default='')
+    protocol        = models.CharField(max_length=10, blank=True, default='')
+    service         = models.CharField(max_length=20, blank=True, default='')
+    state           = models.CharField(max_length=10, blank=True, default='')
+    src_ip          = models.GenericIPAddressField(null=True, blank=True)
+    dst_ip          = models.GenericIPAddressField(null=True, blank=True)
+    port            = models.IntegerField(null=True, blank=True)
+
+    # Numeric features for ML
+    duration        = models.FloatField(null=True, blank=True)
+    packets_sent    = models.IntegerField(null=True, blank=True)
+    bytes_sent      = models.IntegerField(null=True, blank=True)
+
+    # ML output — stored directly so rule engine can query without joining Anomaly table
+    anomaly_score   = models.FloatField(default=0.0, db_index=True)
+    if_score        = models.FloatField(default=0.0)   # Isolation Forest score
+    rf_score        = models.FloatField(default=0.0)   # Random Forest score
 
     def __str__(self):
-        return f"{self.source} - {self.timestamp}"
+        return f"{self.event_type} | {self.source} - {self.timestamp}"
 
 
 class Anomaly(models.Model):
@@ -44,6 +80,8 @@ class Rule(models.Model):
     severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default='medium')
     action = models.CharField(max_length=20, choices=ACTION_CHOICES, default='alert')
     enabled = models.BooleanField(default=True)
+    # Time-window in minutes for count-based / behavioral rules (0 = no window)
+    time_window = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

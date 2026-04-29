@@ -45,8 +45,8 @@ const Navbar = ({ onLogout }) => {
   return (
     <AppBar position="sticky" sx={{ backgroundColor: '#1a237e' }}>
       <Toolbar>
-        <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 'bold' }}>
-          🛡️ AI SIEM System
+        <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 'bold', color: '#ffffff', textAlign: 'center' }}>
+          AI-POWERED SECURITY INFORMATION AND EVENT MANAGEMENT SYSTEM
         </Typography>
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>

@@ -64,9 +64,9 @@ const AIDecisionsPage = () => {
     }
   }, []);
 
-  const fetchAdvanced = useCallback(async () => {
+  const fetchAdvanced = useCallback(async (showSpinner = false) => {
     try {
-      setAdvancedLoading(true);
+      if (showSpinner) setAdvancedLoading(true);
       const response = await aiService.getAdvancedDecisions();
       setAdvancedData(response.data);
     } catch (error) {
@@ -80,7 +80,9 @@ const AIDecisionsPage = () => {
     if (activeTab === 0) {
       fetchDecisions();
     } else if (activeTab === 1) {
-      fetchAdvanced();
+      fetchAdvanced(true);
+      const interval = setInterval(() => fetchAdvanced(false), 30000);
+      return () => clearInterval(interval);
     } else if (activeTab === 2) {
       fetchModels();
     } else {
@@ -180,7 +182,7 @@ const AIDecisionsPage = () => {
   const renderAdvancedTab = () => (
     <Box>
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}>
-        <Button startIcon={<RefreshIcon />} onClick={fetchAdvanced} sx={{ color: '#1a237e' }}>
+        <Button startIcon={<RefreshIcon />} onClick={() => fetchAdvanced(true)} sx={{ color: '#1a237e' }}>
           Refresh
         </Button>
       </Box>

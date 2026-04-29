@@ -55,6 +55,7 @@ export const rulesService = {
   updateRule: (id, data) => api.put(`/rules/${id}/`, data),
   deleteRule: (id) => api.delete(`/rules/${id}/`),
   toggleRule: (id) => api.post(`/rules/${id}/toggle/`),
+  resetRules: () => api.post('/rules/reset/'),
 };
 
 // Thresholds Service

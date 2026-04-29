@@ -43,6 +43,7 @@ const LogsPage = () => {
   const [selectedLog, setSelectedLog] = useState(null);
   const [duplicateFilter, setDuplicateFilter] = useState(false);
   const [sourceFilter, setSourceFilter] = useState('');
+  const [severityFilter, setSeverityFilter] = useState('');
 
   const itemsPerPage = 10;
 
@@ -54,6 +55,7 @@ const LogsPage = () => {
         page_size: itemsPerPage,
         duplicates: duplicateFilter,
         source: sourceFilter,
+        severity: severityFilter,
       });
       setLogs(response.data.results || response.data);
       setTotalCount(response.data.count || (response.data.results || response.data).length || 0);
@@ -63,7 +65,7 @@ const LogsPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [duplicateFilter, page, sourceFilter]);
+  }, [duplicateFilter, page, sourceFilter, severityFilter]);
 
   const fetchDuplicates = useCallback(async () => {
     try {
@@ -92,6 +94,7 @@ const LogsPage = () => {
         page, 
         page_size: itemsPerPage,
         source: sourceFilter,
+        severity: severityFilter,
       });
       setLogs(response.data.results || response.data);
       setTotalCount(response.data.count || (response.data.results || response.data).length || 0);
@@ -127,12 +130,12 @@ const LogsPage = () => {
 
   const getSeverityColor = (severity) => {
     const colors = {
-      critical: 'error',
-      high: 'warning',
-      medium: 'info',
-      low: 'success',
+      critical: 'error', CRITICAL: 'error',
+      high: 'warning',   HIGH: 'warning',
+      medium: 'info',    MEDIUM: 'info',
+      low: 'success',    LOW: 'success',
     };
-    return colors[severity?.toLowerCase()] || 'default';
+    return colors[severity] || 'default';
   };
 
   return (
@@ -173,6 +176,20 @@ const LogsPage = () => {
               size="small"
               sx={{ flex: 1, minWidth: 200 }}
             />
+            <FormControl size="small" sx={{ minWidth: 120 }}>
+              <InputLabel>Severity</InputLabel>
+              <Select
+                value={severityFilter}
+                label="Severity"
+                onChange={(e) => setSeverityFilter(e.target.value)}
+              >
+                <MenuItem value=""><em>All</em></MenuItem>
+                <MenuItem value="critical">Critical</MenuItem>
+                <MenuItem value="high">High</MenuItem>
+                <MenuItem value="medium">Medium</MenuItem>
+                <MenuItem value="low">Low</MenuItem>
+              </Select>
+            </FormControl>
             <FormControl size="small" sx={{ minWidth: 120 }}>
               <InputLabel>Source</InputLabel>
               <Select
@@ -301,65 +318,122 @@ const LogsPage = () => {
         <DialogContent sx={{ mt: 2 }}>
           {selectedLog && (
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <Box>
-                <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>
-                  Timestamp
-                </Typography>
-                <Typography>{new Date(selectedLog.timestamp).toLocaleString()}</Typography>
+
+              {/* Row 1: Timestamp + Source */}
+              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                <Box sx={{ flex: 1, minWidth: 180 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Timestamp</Typography>
+                  <Typography variant="body2">{new Date(selectedLog.timestamp).toLocaleString()}</Typography>
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 180 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Source</Typography>
+                  <Typography variant="body2">{selectedLog.source}</Typography>
+                </Box>
               </Box>
-              <Box>
-                <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>
-                  Source
-                </Typography>
-                <Typography>{selectedLog.source}</Typography>
+
+              {/* Row 2: Event Type + Severity */}
+              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+                <Box sx={{ flex: 1, minWidth: 180 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Event Type</Typography>
+                  <Chip label={selectedLog.event_type || '—'} size="small"
+                    sx={{ backgroundColor: '#e3f2fd', color: '#1a237e', fontWeight: 'bold', mt: 0.5 }} />
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 180 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Severity</Typography>
+                  <Chip label={(selectedLog.severity || '—').toUpperCase()} size="small"
+                    color={getSeverityColor(selectedLog.severity)} sx={{ mt: 0.5, fontWeight: 'bold' }} />
+                </Box>
               </Box>
-              <Box>
-                <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>
-                  Event Type
-                </Typography>
-                <Typography>{selectedLog.event_type}</Typography>
+
+              {/* Row 3: Attack Category + Protocol */}
+              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                <Box sx={{ flex: 1, minWidth: 180 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Attack Category</Typography>
+                  <Typography variant="body2">{selectedLog.attack_category || '—'}</Typography>
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 180 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Protocol</Typography>
+                  <Typography variant="body2">{selectedLog.raw_data?.protocol || '—'}</Typography>
+                </Box>
               </Box>
-              <Box>
-                <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>
-                  Severity
-                </Typography>
-                <Chip label={selectedLog.severity} color={getSeverityColor(selectedLog.severity)} />
+
+              {/* Row 4: Service + State + Port */}
+              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                <Box sx={{ flex: 1, minWidth: 120 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Service</Typography>
+                  <Typography variant="body2">{selectedLog.raw_data?.service || '—'}</Typography>
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 120 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>State</Typography>
+                  <Typography variant="body2">{selectedLog.raw_data?.state || '—'}</Typography>
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 120 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Port</Typography>
+                  <Typography variant="body2">{selectedLog.raw_data?.port ?? '—'}</Typography>
+                </Box>
               </Box>
+
+              {/* Row 5: Src IP + Dst IP */}
+              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                <Box sx={{ flex: 1, minWidth: 180 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Source IP</Typography>
+                  <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{selectedLog.source_ip || '—'}</Typography>
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 180 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Destination IP</Typography>
+                  <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{selectedLog.destination_ip || '—'}</Typography>
+                </Box>
+              </Box>
+
+              {/* Row 6: ML Features */}
               <Box>
-                <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>
-                  Message
-                </Typography>
-                <Typography sx={{ backgroundColor: '#f5f5f5', p: 1, borderRadius: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e', mb: 0.5 }}>ML Features</Typography>
+                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', backgroundColor: '#f5f5f5', p: 1.5, borderRadius: 1 }}>
+                  {[['Duration', selectedLog.features?.duration], ['Packets Sent', selectedLog.features?.packets_sent], ['Bytes Sent', selectedLog.features?.bytes_sent]]
+                    .map(([label, val]) => (
+                      <Box key={label} sx={{ minWidth: 120 }}>
+                        <Typography variant="caption" color="textSecondary">{label}</Typography>
+                        <Typography variant="body2" sx={{ fontWeight: 'bold' }}>{val ?? '—'}</Typography>
+                      </Box>
+                    ))}
+                </Box>
+              </Box>
+
+              {/* Row 7: Anomaly Score + Type */}
+              {(selectedLog.anomaly_score > 0 || selectedLog.anomaly_type) && (
+                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                  <Box sx={{ flex: 1, minWidth: 180 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Anomaly Score</Typography>
+                    <Chip
+                      label={selectedLog.anomaly_score?.toFixed(2) ?? '0.00'} size="small"
+                      sx={{
+                        mt: 0.5, fontWeight: 'bold', color: 'white',
+                        backgroundColor: selectedLog.anomaly_score >= 0.9 ? '#d32f2f'
+                          : selectedLog.anomaly_score >= 0.75 ? '#f57c00'
+                          : selectedLog.anomaly_score >= 0.45 ? '#388e3c' : '#9e9e9e',
+                      }} />
+                  </Box>
+                  <Box sx={{ flex: 1, minWidth: 180 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Anomaly Type</Typography>
+                    <Typography variant="body2">{selectedLog.anomaly_type || 'Clean'}</Typography>
+                  </Box>
+                </Box>
+              )}
+
+              {/* Row 8: Message */}
+              <Box>
+                <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Message</Typography>
+                <Typography sx={{ backgroundColor: '#f5f5f5', p: 1.5, borderRadius: 1, fontSize: '0.85rem',
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-word', mt: 0.5 }}>
                   {selectedLog.message}
                 </Typography>
               </Box>
-              {selectedLog.raw_data && (
-                <Box>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>
-                    Raw Data
-                  </Typography>
-                  <Typography sx={{ backgroundColor: '#f5f5f5', p: 1, borderRadius: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.85rem' }}>
-                    {typeof selectedLog.raw_data === 'string' ? selectedLog.raw_data : JSON.stringify(selectedLog.raw_data, null, 2)}
-                  </Typography>
-                </Box>
-              )}
-              {selectedLog.metadata && (
-                <Box>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>
-                    Metadata
-                  </Typography>
-                  <Typography sx={{ backgroundColor: '#f5f5f5', p: 1, borderRadius: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '0.85rem' }}>
-                    {JSON.stringify(selectedLog.metadata, null, 2)}
-                  </Typography>
-                </Box>
-              )}
+
             </Box>
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleCloseDetails} sx={{ color: '#1a237e' }}>
-            Close
-          </Button>
+          <Button onClick={handleCloseDetails} sx={{ color: '#1a237e' }}>Close</Button>
         </DialogActions>
       </Dialog>
     </Container>

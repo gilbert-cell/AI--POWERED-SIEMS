@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Box,
   Container,
@@ -43,6 +44,8 @@ const Dashboard = () => {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [timeRange, setTimeRange] = useState('live');
   const liveRef = useRef(null);
+
+  const navigate = useNavigate();
 
   const fetchDashboardData = async () => {
     try {
@@ -194,7 +197,9 @@ const Dashboard = () => {
         {Object.keys(sourceStats?.source_counts ?? {}).length > 0
           ? Object.entries(sourceStats.source_counts).map(([source, count]) => (
             <Grid item xs={12} sm={6} md={4} key={source}>
-              <Card sx={{ backgroundColor: '#f5f5f5' }}>
+              <Card sx={{ backgroundColor: '#f5f5f5', cursor: 'pointer', '&:hover': { boxShadow: 4, backgroundColor: '#e3f2fd' } }}
+                onClick={() => navigate(`/logs/${source}`)}
+              >
                 <CardContent>
                   <Typography color="textSecondary" gutterBottom sx={{ textTransform: 'uppercase' }}>
                     {source} logs
@@ -209,7 +214,9 @@ const Dashboard = () => {
           ))
           : ['network', 'dos', 'intrusion'].map((source) => (
             <Grid item xs={12} sm={4} key={source}>
-              <Card sx={{ backgroundColor: '#f5f5f5' }}>
+              <Card sx={{ backgroundColor: '#f5f5f5', cursor: 'pointer', '&:hover': { boxShadow: 4, backgroundColor: '#e3f2fd' } }}
+                onClick={() => navigate(`/logs/${source}`)}
+              >
                 <CardContent>
                   <Typography color="textSecondary" gutterBottom sx={{ textTransform: 'uppercase' }}>
                     {source} logs

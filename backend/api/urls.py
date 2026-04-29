@@ -30,6 +30,7 @@ urlpatterns = [
     # AI anomaly detection endpoints
     path('detection/run/', views.run_anomaly_detection, name='run-anomaly-detection'),
     path('detection/anomalies/', views.behavior_anomalies, name='detection-anomalies'),
+    path('detection/pipeline/', views.realtime_pipeline, name='realtime-pipeline'),
 
     # AI service endpoints
     path('ai/models/', views.ai_models_list, name='ai-models-list'),
@@ -50,6 +51,7 @@ urlpatterns = [
     
     # Rules endpoints
     path('rules/', views.rules_list, name='rules-list'),
+    path('rules/reset/', views.rules_reset, name='rules-reset'),
     path('rules/<int:rule_id>/', views.rule_detail, name='rule-detail'),
     path('rules/<int:rule_id>/toggle/', views.rule_toggle, name='rule-toggle'),
 

@@ -4,12 +4,16 @@ import pandas as pd
 import re
 from pathlib import Path
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 MODEL_PATH = BASE_DIR / "model.pkl"
 IF_MODEL_PATH = BASE_DIR / "isolation_forest.pkl"
+IF_SCALER_PATH = BASE_DIR / "isolation_forest_scaler.pkl"
+# Score normalization bounds saved at train time so live scoring is consistent
+IF_SCORE_BOUNDS_PATH = BASE_DIR / "isolation_forest_bounds.pkl"
 
 
 def get_dataset_path(filename: str = "UNSW_NB15_training-set.csv") -> Path:
@@ -116,24 +120,41 @@ def load_dataset_to_logs(csv_filename: str = "UNSW_NB15_training-set.csv", max_r
     for _, row in rows_to_load.iterrows():
         source = str(row.get("service") or row.get("proto") or "UNSW_NB15")[:50]
         attack_cat = str(row.get("attack_cat", "Normal")).strip()
-        proto = str(row.get("proto", "-")).strip()
-        service = str(row.get("service", "-")).strip()
-        state = str(row.get("state", "-")).strip()
-        
+        proto   = str(row.get("proto",    "-")).strip()
+        service = str(row.get("service",  "-")).strip()
+        state   = str(row.get("state",    "-")).strip()
+        dur     = float(row.get('dur',   0) or 0)
+        spkts   = int(row.get('spkts',   0) or 0)
+        sbytes  = int(row.get('sbytes',  0) or 0)
+
         message = (
             f"Attack Category: {attack_cat} | Protocol: {proto} | Service: {service} | "
-            f"State: {state} | Duration: {row.get('dur', 'N/A')} | "
-            f"Packets sent: {row.get('spkts', 'N/A')} | Bytes sent: {row.get('sbytes', 'N/A')}"
+            f"State: {state} | Duration: {dur} | "
+            f"Packets sent: {spkts} | Bytes sent: {sbytes}"
         )
-        
-        # True label from dataset: 0 = Normal/benign, 1 = Attack
+
         true_label = int(row.get("label", 0))
         level = "CRITICAL" if attack_cat != "Normal" else "INFO"
 
+        # Normalize attack category and event type
+        from .views import normalize_event_type, normalize_severity, normalize_attack_category
+        etype = normalize_event_type(message, attack_cat, level)
+        sev   = normalize_severity(message, level, attack_cat)
+        cat   = normalize_attack_category(etype, attack_cat)
+
         log = Log.objects.create(
-            source=source,
-            message=message,
-            level=level,
+            source          = source,
+            message         = message,
+            level           = level,
+            event_type      = etype,
+            severity        = sev,
+            attack_category = cat,
+            protocol        = proto,
+            service         = service if service != '-' else '',
+            state           = state   if state   != '-' else '',
+            duration        = dur,
+            packets_sent    = spkts,
+            bytes_sent      = sbytes,
         )
 
         # Get anomaly score based on attack category
@@ -238,25 +259,41 @@ IF_FEATURES = [
 
 
 def train_isolation_forest(csv_filename: str = 'UNSW_NB15_training-set.csv') -> dict:
-    """Train Isolation Forest on the real UNSW-NB15 dataset (normal traffic only)."""
+    """Train Isolation Forest on UNSW-NB15 normal traffic with proper scaling and score normalization."""
     csv_path = get_dataset_path(csv_filename)
     if not csv_path.exists():
         raise FileNotFoundError(f'Dataset not found at {csv_path}.')
 
     df = pd.read_csv(csv_path, low_memory=False)
 
-    # Train only on normal traffic so the model learns what "normal" looks like
-    normal_df = df[df['label'] == 0][IF_FEATURES].fillna(0)
+    # Drop id — it is just a row index, not a feature
+    available = [c for c in IF_FEATURES if c in df.columns]
+    normal_df = df[df['label'] == 0][available].fillna(0)
+
+    # Scale features — required for Isolation Forest to work correctly
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(normal_df)
 
     model = IsolationForest(n_estimators=100, contamination=0.05, random_state=42, n_jobs=-1)
-    model.fit(normal_df)
+    model.fit(X_scaled)
 
-    artifact = {'model': model, 'columns': IF_FEATURES}
-    joblib.dump(artifact, IF_MODEL_PATH)
+    # Compute score bounds on the FULL dataset so live scores are normalized consistently
+    all_df = df[available].fillna(0)
+    all_scaled = scaler.transform(all_df)
+    raw_scores = model.decision_function(all_scaled)
+    score_min = float(raw_scores.min())
+    score_max = float(raw_scores.max())
+
+    joblib.dump({'model': model, 'columns': available}, IF_MODEL_PATH)
+    joblib.dump(scaler, IF_SCALER_PATH)
+    joblib.dump({'min': score_min, 'max': score_max}, IF_SCORE_BOUNDS_PATH)
+
     return {
         'model_path': str(IF_MODEL_PATH),
-        'feature_count': len(IF_FEATURES),
+        'feature_count': len(available),
         'training_samples': len(normal_df),
+        'score_min': round(score_min, 4),
+        'score_max': round(score_max, 4),
     }
 
 
@@ -266,24 +303,69 @@ def load_if_artifact() -> dict | None:
     return None
 
 
+# SIEM log features → UNSW-NB15 feature mapping
+# Maps (duration, packets_sent, bytes_sent) from live logs to IF feature space
+def _siem_record_to_if_features(record: dict, columns: list) -> pd.DataFrame:
+    """Map SIEM log fields to Isolation Forest feature vector."""
+    row = {c: 0.0 for c in columns}
+    # Direct mappings from SIEM structured fields
+    row['dur']    = float(record.get('duration',     record.get('dur',    0)) or 0)
+    row['spkts']  = float(record.get('packets_sent', record.get('spkts',  0)) or 0)
+    row['sbytes'] = float(record.get('bytes_sent',   record.get('sbytes', 0)) or 0)
+    # Derive dpkts/dbytes as rough estimates if not provided
+    row['dpkts']  = float(record.get('dpkts',  row['spkts']  * 0.8) or 0)
+    row['dbytes'] = float(record.get('dbytes', row['sbytes'] * 0.7) or 0)
+    row['rate']   = float(row['spkts'] / row['dur'] if row['dur'] > 0 else 0)
+    row['sload']  = float(row['sbytes'] * 8 / row['dur'] if row['dur'] > 0 else 0)
+    row['dload']  = float(row['dbytes'] * 8 / row['dur'] if row['dur'] > 0 else 0)
+    return pd.DataFrame([row]).reindex(columns=columns, fill_value=0)
+
+
 def if_score_record(record: dict) -> float | None:
-    """Score a record with Isolation Forest. Returns anomaly probability 0-1 (higher = more anomalous).
-    Accepts either UNSW-NB15 numeric features or a partial dict (missing features filled with 0).
+    """Score a record with Isolation Forest.
+    Returns anomaly score 0–1 (higher = more anomalous).
+    Accepts UNSW-NB15 features OR SIEM log fields (duration, packets_sent, bytes_sent).
     """
     artifact = load_if_artifact()
     if artifact is None:
         return None
     try:
-        model = artifact['model']
+        model   = artifact['model']
         columns = artifact['columns']
-        df = pd.DataFrame([record]).reindex(columns=columns, fill_value=0)
-        # decision_function: negative = anomaly, positive = normal
-        # Map to 0-1 where 1 = most anomalous
-        raw = model.decision_function(df)[0]
-        score = float(np.clip(0.5 - raw, 0.0, 1.0))
-        return round(score, 2)
+
+        # Build feature vector
+        df = _siem_record_to_if_features(record, columns)
+
+        # Apply scaler if available
+        if IF_SCALER_PATH.exists():
+            scaler = joblib.load(IF_SCALER_PATH)
+            X = scaler.transform(df)
+        else:
+            X = df.values
+
+        raw = model.decision_function(X)[0]
+
+        # Normalize to 0–1 using saved bounds (higher = more anomalous)
+        if IF_SCORE_BOUNDS_PATH.exists():
+            bounds = joblib.load(IF_SCORE_BOUNDS_PATH)
+            s_min, s_max = bounds['min'], bounds['max']
+            span = s_max - s_min
+            normalized = 1.0 - (raw - s_min) / span if span > 0 else 0.5
+        else:
+            normalized = float(np.clip(0.5 - raw, 0.0, 1.0))
+
+        return round(float(np.clip(normalized, 0.0, 1.0)), 2)
     except Exception:
         return None
+
+
+def score_siem_log(duration: float, packets_sent: int, bytes_sent: int) -> float | None:
+    """Convenience function: score a live SIEM log directly from its ML features."""
+    return if_score_record({
+        'duration': duration,
+        'packets_sent': packets_sent,
+        'bytes_sent': bytes_sent,
+    })
 
 
 def predict_record(record: dict) -> dict:

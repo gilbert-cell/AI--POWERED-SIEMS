@@ -19,6 +19,7 @@ import AnalyticsPage from './pages/AnalyticsPage';
 import ProfilePage from './pages/ProfilePage';
 import SettingsPage from './pages/SettingsPage';
 import AdminDashboard from './pages/AdminDashboard';
+import LogDetailsPage from './pages/LogDetailsPage';
 
 // Styles
 import './App.css';
@@ -106,6 +107,7 @@ function App() {
             <Routes>
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/logs" element={<LogsPage />} />
+              <Route path="/logs/:source" element={<LogDetailsPage />} />
               <Route path="/behavior" element={<BehaviorAnalysisPage />} />
               <Route path="/rules" element={<RulesPage />} />
               <Route path="/ai-decisions" element={<AIDecisionsPage />} />
