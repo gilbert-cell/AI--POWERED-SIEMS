@@ -78,7 +78,7 @@ const BehaviorAnalysisPage = () => {
     setIsLive(range === 'live');
     setTimeRange(range === 'live' ? '1h' : range);
     if (range === 'live') {
-      liveRef.current = setInterval(fetchBehaviorData, 5000);
+      liveRef.current = setInterval(fetchBehaviorData, 20000);
     }
   };
 

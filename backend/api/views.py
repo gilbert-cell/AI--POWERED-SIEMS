@@ -537,19 +537,20 @@ def dashboard_stats(request):
     from .models import Log, Anomaly
     from django.utils import timezone
     total_alerts = Log.objects.count()
-    critical_alerts = Anomaly.objects.filter(score__gte=0.9).count()
-    high_alerts = Anomaly.objects.filter(score__gte=0.75).count()
-    # False positives:
-    # 1. UNSW-NB15 Normal records the model incorrectly flagged (status set by load_dataset_to_logs)
-    # 2. Linux/realtime INFO-level logs that got flagged as anomalies (benign events)
+    # Critical: anomalies on CRITICAL-severity logs (updates live as new logs arrive)
+    critical_alerts = Anomaly.objects.filter(
+        log__severity='CRITICAL'
+    ).exclude(
+        models.Q(status='false_positive') | models.Q(log__severity='LOW')
+    ).count()
+    # False positives: LOW-severity logs flagged by ML + manually marked
     false_positives = Anomaly.objects.filter(
-        models.Q(status='false_positive') | models.Q(log__level='INFO')
+        models.Q(status='false_positive') | models.Q(log__severity='LOW')
     ).distinct().count()
     detection_rate = round((Anomaly.objects.count() / total_alerts * 100), 1) if total_alerts > 0 else 0
     return JsonResponse({
         'total_alerts': total_alerts,
         'critical_alerts': critical_alerts,
-        'high_alerts': high_alerts,
         'false_positives': false_positives,
         'detection_rate': detection_rate,
     })
@@ -564,10 +565,10 @@ def dashboard_source_stats(request):
     source_qs = Log.objects.values('source').annotate(count=Count('id'))
     source_counts = {row['source']: row['count'] for row in source_qs}
 
-    # False positives per source: UNSW-NB15 Normal records flagged OR INFO logs flagged
+    # False positives per source: LOW-severity flagged + manually marked
     fp_qs = Anomaly.objects.filter(
-        Q(status='false_positive') | Q(log__level='INFO')
-    ).values('log__source').annotate(count=Count('id'))
+        Q(status='false_positive') | Q(log__severity='LOW')
+    ).distinct().values('log__source').annotate(count=Count('id'))
     false_positive_counts = {row['log__source']: row['count'] for row in fp_qs}
 
     return JsonResponse({
@@ -578,38 +579,48 @@ def dashboard_source_stats(request):
 
 @require_http_methods(["GET"])
 def dashboard_trends(request):
-    """Get alert trends for the specified number of days"""
+    """Get real alert trends per day from the DB."""
+    from .models import Log, Anomaly
+    from django.utils import timezone
+    from django.db.models import Count
     days = int(request.GET.get('days', 30))
-    
-    # Generate sample trend data
+    now = timezone.now()
     trends = []
     for i in range(days):
-        date = datetime.now() - timedelta(days=days-i)
+        day_start = now - timedelta(days=days - i)
+        day_end   = now - timedelta(days=days - i - 1)
+        alerts   = Log.objects.filter(timestamp__gte=day_start, timestamp__lt=day_end).count()
+        resolved = Anomaly.objects.filter(created_at__gte=day_start, created_at__lt=day_end, status='resolved').count()
         trends.append({
-            'date': date.strftime('%Y-%m-%d'),
-            'alerts': 10 + (i % 15),
-            'resolved': 8 + (i % 12)
+            'date':     day_start.strftime('%Y-%m-%d'),
+            'alerts':   alerts,
+            'resolved': resolved,
         })
-    
     return JsonResponse({'trends': trends})
 
 @require_http_methods(["GET"])
 def dashboard_top_alerts(request):
-    """Get top alert types from UNSW-NB15 dataset"""
+    """Get top alert types from real DB anomalies."""
+    from .models import Anomaly
+    from django.db.models import Count
     limit = int(request.GET.get('limit', 10))
-    # Real counts from UNSW_NB15_training-set.csv (175341 records)
-    alert_types = [
-        {'alert_type': 'Generic', 'count': 40000, 'severity': 'high'},
-        {'alert_type': 'Exploits', 'count': 33393, 'severity': 'critical'},
-        {'alert_type': 'Fuzzers', 'count': 18184, 'severity': 'medium'},
-        {'alert_type': 'DoS', 'count': 12264, 'severity': 'critical'},
-        {'alert_type': 'Reconnaissance', 'count': 10491, 'severity': 'high'},
-        {'alert_type': 'Analysis', 'count': 2000, 'severity': 'medium'},
-        {'alert_type': 'Backdoor', 'count': 1746, 'severity': 'critical'},
-        {'alert_type': 'Shellcode', 'count': 1133, 'severity': 'critical'},
-        {'alert_type': 'Worms', 'count': 130, 'severity': 'high'},
-    ]
-    return JsonResponse({'top_alerts': alert_types[:limit]})
+    rows = (
+        Anomaly.objects
+        .values('anomaly_type')
+        .annotate(count=Count('id'))
+        .order_by('-count')[:limit]
+    )
+    def _sev(atype):
+        atype = (atype or '').lower()
+        if any(k in atype for k in ['brute','sql','shellcode','backdoor','malware','ddos','privilege','exploit','intrusion']):
+            return 'critical'
+        if any(k in atype for k in ['port','xss','worm','recon','web']):
+            return 'high'
+        return 'medium'
+    return JsonResponse({'top_alerts': [
+        {'alert_type': row['anomaly_type'], 'count': row['count'], 'severity': _sev(row['anomaly_type'])}
+        for row in rows
+    ]})
 
 @require_http_methods(["GET"])
 def dashboard_health(request):
@@ -1123,6 +1134,7 @@ def ai_decisions(request):
                         'id': anomaly.id,
                         'timestamp': anomaly.log.timestamp.isoformat(),
                         'event_description': f'{anomaly.anomaly_type}: {anomaly.log.message[:100]}',
+                        'attack_type': anomaly.anomaly_type,
                         'decision': 'threat' if confidence >= 60 else 'suspicious',
                         'confidence': confidence,
                         'score': round(anomaly.score, 2),
@@ -1244,13 +1256,13 @@ def ai_accuracy(request):
     total_logs = Log.objects.count()
     anomalies = Anomaly.objects.all()
 
-    # Real false positives: marked as false_positive OR INFO-level logs that got flagged
+    # False positives: LOW-severity logs flagged by ML + manually marked
     fp = Anomaly.objects.filter(
-        Q(status='false_positive') | Q(log__level='INFO')
+        Q(status='false_positive') | Q(log__severity='LOW')
     ).distinct().count()
 
     tp = anomalies.filter(score__gte=0.6).exclude(
-        Q(status='false_positive') | Q(log__level='INFO')
+        Q(status='false_positive') | Q(log__severity='LOW')
     ).count()
     fn = max(0, int(total_logs * 0.03) - fp)
     tn = max(0, total_logs - tp - fp - fn)
@@ -1453,6 +1465,63 @@ def confirm_anomaly_threat(request, anomaly_id):
         return JsonResponse({'success': False, 'error': str(e)}, status=400)
 
 # ── Rules Endpoints ──────────────────────────────────────────────────────────
+
+# Maps AI decision attack types → rule fields
+_DECISION_RULE_MAP = {
+    'Brute Force':            {'rule_type': 'behavior',   'severity': 'high',     'action': 'block',       'condition': 'count(event_type == "LOGIN_FAILED" AND same src_ip) > 5', 'time_window': 5},
+    'Suspicious Login':       {'rule_type': 'behavior',   'severity': 'high',     'action': 'alert',       'condition': 'count(event_type == "LOGIN_FAILED" AND same src_ip) > 3', 'time_window': 10},
+    'Unauthorized Access':    {'rule_type': 'pattern',    'severity': 'critical', 'action': 'block',       'condition': '"authentication failure" in message.lower()', 'time_window': 0},
+    'Network Intrusion':      {'rule_type': 'pattern',    'severity': 'critical', 'action': 'block',       'condition': '"UFW BLOCK" in message OR "SYN flood" in message', 'time_window': 0},
+    'Web Application Attack':  {'rule_type': 'pattern',    'severity': 'critical', 'action': 'block',       'condition': '"sql injection" in message.lower() OR "xss" in message.lower()', 'time_window': 0},
+    'Privilege Escalation':   {'rule_type': 'pattern',    'severity': 'critical', 'action': 'block',       'condition': '"privilege escalation" in message.lower() OR "sudo:" in message', 'time_window': 0},
+    'DDoS / Flood':           {'rule_type': 'threshold',  'severity': 'critical', 'action': 'block',       'condition': 'count(same src_ip) > 100', 'time_window': 1},
+    'System Instability':     {'rule_type': 'pattern',    'severity': 'medium',   'action': 'alert',       'condition': '"kernel panic" in message OR "OOM killer" in message', 'time_window': 0},
+    'High severity event':    {'rule_type': 'ml',         'severity': 'high',     'action': 'alert',       'condition': 'anomaly_score > 0.75', 'time_window': 0},
+    'ML Threat Detection':    {'rule_type': 'ml',         'severity': 'critical', 'action': 'block',       'condition': 'anomaly_score > 0.9', 'time_window': 0},
+    'Generic':                {'rule_type': 'pattern',    'severity': 'medium',   'action': 'alert',       'condition': 'event_type == "GENERIC_ATTACK"', 'time_window': 0},
+    'Exploits':               {'rule_type': 'ml',         'severity': 'critical', 'action': 'block',       'condition': 'anomaly_score > 0.85 AND event_type == "EXPLOIT_ATTEMPT"', 'time_window': 0},
+    'Fuzzers':                {'rule_type': 'pattern',    'severity': 'medium',   'action': 'alert',       'condition': 'event_type == "FUZZER"', 'time_window': 0},
+    'DoS':                    {'rule_type': 'threshold',  'severity': 'critical', 'action': 'block',       'condition': 'count(same src_ip) > 50', 'time_window': 1},
+    'Reconnaissance':         {'rule_type': 'behavior',   'severity': 'high',     'action': 'alert',       'condition': 'count(unique_ports from same src_ip) > 10', 'time_window': 1},
+}
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def rule_from_decision(request):
+    """Auto-create a detection rule from an AI decision/anomaly."""
+    from .models import Rule
+    try:
+        data = json.loads(request.body)
+        attack_type = data.get('attack_type', '')
+        source      = data.get('source', '')
+        score       = float(data.get('score', 0))
+
+        defaults = _DECISION_RULE_MAP.get(attack_type, {
+            'rule_type': 'ml', 'severity': 'high', 'action': 'alert',
+            'condition': f'anomaly_score > {max(round(score - 0.05, 2), 0.5)}',
+            'time_window': 0,
+        })
+
+        name = f'AI: {attack_type} ({source})' if source else f'AI: {attack_type}'
+        # Avoid exact duplicates
+        if Rule.objects.filter(name=name).exists():
+            rule = Rule.objects.get(name=name)
+            return JsonResponse({'status': 'exists', 'rule': _rule_to_dict(rule)})
+
+        rule = Rule.objects.create(
+            name        = name,
+            description = f'Auto-generated from AI decision — {attack_type} detected from {source} (score={score})',
+            rule_type   = defaults['rule_type'],
+            condition   = defaults['condition'],
+            severity    = defaults['severity'],
+            action      = defaults['action'],
+            enabled     = True,
+            time_window = defaults['time_window'],
+        )
+        return JsonResponse({'status': 'created', 'rule': _rule_to_dict(rule)}, status=201)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)
 
 def _rule_to_dict(rule):
     return {
@@ -1730,20 +1799,43 @@ def _filter_logs(source=None):
     return logs
 
 
+_RANGE_MAP = {
+    '30min': timedelta(minutes=30),
+    '1h':    timedelta(hours=1),
+    '24h':   timedelta(hours=24),
+    '7d':    timedelta(days=7),
+    '30d':   timedelta(days=30),
+}
+
+def _apply_filters(qs, request, ts_field='timestamp'):
+    """Apply time-range and source filters to a queryset.
+    ts_field: 'timestamp' for Log, 'log__timestamp' for Anomaly.
+    """
+    from django.utils import timezone
+    source = request.GET.get('source')
+    range_key = request.GET.get('range', request.GET.get('time_range', ''))
+    if source and source != 'all':
+        src_field = 'source__iexact' if ts_field == 'timestamp' else 'log__source__iexact'
+        qs = qs.filter(**{src_field: source})
+    delta = _RANGE_MAP.get(range_key)
+    if delta:
+        qs = qs.filter(**{f'{ts_field}__gte': timezone.now() - delta})
+    return qs
+
+
 # Analytics Endpoints
 @require_http_methods(["GET"])
 def analytics_summary(request):
-    """Get analytics summary from UNSW-NB15 dataset"""
     from .models import Log, Anomaly
-    db_count = Log.objects.count()
-    total_events = db_count if db_count > 0 else 175341
-    # Real dataset: 119341 attacks / 175341 total = 68.1% attack rate
-    critical_alerts = round(total_events * (47389 / 175341))  # Exploits+Backdoor+Shellcode+Worms
-    false_positives = Anomaly.objects.filter(status='false_positive').count()
-    detection_accuracy = 100.0 if total_events == 0 else round(((total_events - false_positives) / total_events * 100), 1)
+    logs = _apply_filters(Log.objects.all(), request)
+    total_events = logs.count()
+    false_positives = _apply_filters(
+        Anomaly.objects.filter(status='false_positive').select_related('log'),
+        request, ts_field='log__timestamp'
+    ).count() if total_events else 0
+    detection_accuracy = round(min((total_events - false_positives) / total_events * 100, 100.0), 1) if total_events else 0.0
     return JsonResponse({
         'total_events': total_events,
-        'critical_alerts': critical_alerts,
         'false_positives': false_positives,
         'detection_accuracy': detection_accuracy,
         'avg_response_time': 2.3,
@@ -1753,28 +1845,13 @@ def analytics_summary(request):
 
 @require_http_methods(["GET"])
 def analytics_severity_distribution(request):
-    """Get event distribution by severity from DB logs."""
     from .models import Log
-    source_filter = request.GET.get('source')
-    logs = Log.objects.all()
-    if source_filter and source_filter != 'all':
-        logs = logs.filter(source__iexact=source_filter)
-
-    severity_counts = {'low': 0, 'medium': 0, 'high': 0, 'critical': 0}
-    for log in logs:
-        if log.level == 'INFO':
-            severity_counts['low'] += 1
-        elif log.level == 'WARNING':
-            severity_counts['medium'] += 1
-        elif log.level == 'ERROR':
-            severity_counts['high'] += 1
-        elif log.level == 'CRITICAL':
-            severity_counts['critical'] += 1
-
-    # If DB is empty fall back to sample distribution
-    if not any(severity_counts.values()):
+    from django.db.models import Count
+    logs = _apply_filters(Log.objects.all(), request)
+    rows = logs.values('severity').annotate(count=Count('id'))
+    severity_counts = {row['severity'].lower(): row['count'] for row in rows if row['severity']}
+    if not severity_counts:
         severity_counts = {'low': 20, 'medium': 15, 'high': 10, 'critical': 5}
-
     return JsonResponse({
         'severity_distribution': [
             {'severity': s, 'count': c} for s, c in severity_counts.items() if c > 0
@@ -1782,99 +1859,65 @@ def analytics_severity_distribution(request):
     })
 
 
+# Human-readable labels for event_type codes
+_EVENT_TYPE_LABELS = {
+    'PORT_SCAN': 'Port Scan', 'BRUTE_FORCE': 'Brute Force',
+    'SQL_INJECTION': 'SQL Injection', 'XSS_ATTACK': 'XSS Attack',
+    'PRIVILEGE_ESCALATION': 'Privilege Escalation', 'MALWARE_ACTIVITY': 'Malware',
+    'DDOS_ATTACK': 'DDoS Attack', 'DOS_ATTACK': 'DoS Attack',
+    'FIREWALL_BLOCK': 'Firewall Block', 'LOGIN_FAILED': 'Login Failed',
+    'LOGIN_SUCCESS': 'Login Success', 'CONFIG_CHANGE': 'Config Change',
+    'FILE_ACCESS': 'File Access', 'EXPLOIT_ATTEMPT': 'Exploit Attempt',
+    'BACKDOOR': 'Backdoor', 'SHELLCODE': 'Shellcode',
+    'RECONNAISSANCE': 'Reconnaissance', 'WORM': 'Worm',
+    'FUZZER': 'Fuzzer', 'GENERIC_ATTACK': 'Generic Attack', 'UNKNOWN': 'Unknown',
+}
+
 @require_http_methods(["GET"])
 def analytics_event_types(request):
-    """Get top event types derived from log message content."""
     from .models import Log
-    source_filter = request.GET.get('source')
+    from django.db.models import Count
     limit = int(request.GET.get('limit', 10))
-
-    logs = Log.objects.all()
-    if source_filter and source_filter != 'all':
-        logs = logs.filter(source__iexact=source_filter)
-
-    # Derive event type from message keywords
-    EVENT_KEYWORDS = [
-        ('SQL Injection',        re.compile(r'sql injection', re.I)),
-        ('XSS Attack',           re.compile(r'xss|cross-site scripting', re.I)),
-        ('Privilege Escalation', re.compile(r'privilege escalation|sudo:', re.I)),
-        ('Brute Force',          re.compile(r'failed password|authentication failure|invalid user', re.I)),
-        ('Port Scan',            re.compile(r'UFW BLOCK|DPT=|port scan', re.I)),
-        ('DDoS / Flood',         re.compile(r'SYN flood|ddos|connection reset', re.I)),
-        ('Malware',              re.compile(r'malware signature', re.I)),
-        ('Firewall Block',       re.compile(r'blocked port scan|connection blocked', re.I)),
-        ('Login Failed',         re.compile(r'login failed|failed login', re.I)),
-        ('Config Change',        re.compile(r'config modified', re.I)),
-    ]
-
-    event_counts = {}
-    for log in logs:
-        matched = False
-        for label, pattern in EVENT_KEYWORDS:
-            if pattern.search(log.message or ''):
-                event_counts[label] = event_counts.get(label, 0) + 1
-                matched = True
-                break
-        if not matched:
-            event_counts['Other'] = event_counts.get('Other', 0) + 1
-
-    if not event_counts:
-        # Fallback sample data
-        event_counts = {'Login Failed': 30, 'Port Scan': 20, 'SQL Injection': 15,
-                        'Privilege Escalation': 10, 'DDoS / Flood': 8, 'Malware': 5}
-
-    sorted_types = sorted(event_counts.items(), key=lambda x: x[1], reverse=True)
+    logs = _apply_filters(Log.objects.all(), request)
+    rows = logs.values('event_type').annotate(count=Count('id')).order_by('-count')[:limit]
+    if not rows:
+        return JsonResponse({'event_types': [{'event_type': 'Port Scan', 'count': 30}]})
     return JsonResponse({
-        'event_types': [{'event_type': k, 'count': v} for k, v in sorted_types[:limit]]
+        'event_types': [
+            {'event_type': _EVENT_TYPE_LABELS.get(row['event_type'], row['event_type']), 'count': row['count']}
+            for row in rows
+        ]
     })
 
 
 @require_http_methods(["GET"])
 def analytics_source_metrics(request):
-    """Get metrics by source system — derived from UNSW-NB15 dataset"""
-    # Real UNSW-NB15 attack category counts mapped to SIEM source systems
-    source_metrics = {
-        'network': {
-            'total': 175341,
-            'critical': 47389,   # Exploits(33393) + Backdoor(1746) + Shellcode(1133) + Worms(130) + DoS(10491 partial)
-            'high': 52491,       # Generic(40000) + Reconnaissance(10491) + Worms(130 partial)
-            'medium': 20184,     # Fuzzers(18184) + Analysis(2000)
-            'low': 56000,        # Normal traffic
-            'false_positives': 0,
+    from .models import Log, Anomaly
+    from django.db.models import Count, Case, When, IntegerField, Sum, Q
+    logs = _apply_filters(Log.objects.all(), request)
+    breakdown = logs.values('source').annotate(
+        total=Count('id'),
+        critical=Sum(Case(When(level='CRITICAL', then=1), default=0, output_field=IntegerField())),
+        high=Sum(Case(When(level='ERROR', then=1), default=0, output_field=IntegerField())),
+        medium=Sum(Case(When(level='WARNING', then=1), default=0, output_field=IntegerField())),
+        low=Sum(Case(When(level='INFO', then=1), default=0, output_field=IntegerField())),
+    ).order_by('-total')
+    # False positives: cumulative per source (not time-filtered — it's a quality metric)
+    fp_qs = Anomaly.objects.filter(
+        Q(status='false_positive') | Q(log__severity='LOW')
+    ).distinct().values('log__source').annotate(count=Count('id'))
+    fp_map = {row['log__source']: row['count'] for row in fp_qs}
+    return JsonResponse({'source_metrics': {
+        row['source']: {
+            'total': row['total'],
+            'critical': row['critical'] or 0,
+            'high': row['high'] or 0,
+            'medium': row['medium'] or 0,
+            'low': row['low'] or 0,
+            'false_positives': fp_map.get(row['source'], 0),
             'duplicates': 0,
-        },
-        'tcp': {
-            'total': 79946,
-            'critical': 28000,
-            'high': 22000,
-            'medium': 12000,
-            'low': 17946,
-            'false_positives': 0,
-            'duplicates': 0,
-        },
-        'udp': {
-            'total': 63283,
-            'critical': 12000,
-            'high': 18000,
-            'medium': 8000,
-            'low': 25283,
-            'false_positives': 0,
-            'duplicates': 0,
-        },
-        'dns': {
-            'total': 47294,
-            'critical': 2000,
-            'high': 5000,
-            'medium': 3000,
-            'low': 37294,
-            'false_positives': 0,
-            'duplicates': 0,
-        },
-    }
-    source_filter = request.GET.get('source')
-    if source_filter and source_filter != 'all' and source_filter in source_metrics:
-        source_metrics = {source_filter: source_metrics[source_filter]}
-    return JsonResponse({'source_metrics': source_metrics})
+        } for row in breakdown
+    }})
 
 
 @require_http_methods(["GET"])
@@ -1933,18 +1976,13 @@ def analytics_detection_accuracy(request):
 
 @require_http_methods(["GET"])
 def analytics_top_hosts(request):
-    """Get top hosts by event count."""
-    logs = _filter_logs(request.GET.get('source'))
-    host_counts = {}
-    for log in logs:
-        host = log['metadata']['host']
-        host_counts[host] = host_counts.get(host, 0) + 1
+    from .models import Log
+    from django.db.models import Count
     limit = int(request.GET.get('limit', 10))
-    sorted_hosts = sorted(host_counts.items(), key=lambda x: x[1], reverse=True)
+    logs = _apply_filters(Log.objects.exclude(src_ip=None), request)
+    hosts = logs.values('src_ip').annotate(event_count=Count('id')).order_by('-event_count')[:limit]
     return JsonResponse({
-        'top_hosts': [
-            {'host': h, 'event_count': c} for h, c in sorted_hosts[:limit]
-        ]
+        'top_hosts': [{'host': row['src_ip'], 'event_count': row['event_count']} for row in hosts]
     })
 
 
@@ -1953,11 +1991,13 @@ def analytics_export(request):
     """Export analytics data as CSV"""
     import csv
     from django.http import HttpResponse
+    from .models import Log
 
     source_filter = request.GET.get('source')
-    logs = get_sample_logs()
+    qs = Log.objects.all().order_by('-timestamp')
     if source_filter:
-        logs = [l for l in logs if l['source'] == source_filter]
+        qs = qs.filter(source=source_filter)
+    logs = [build_log_payload(log, getattr(log, 'anomaly', None)) for log in qs[:5000]]
 
     response = HttpResponse(content_type='text/csv')
     response['Content-Disposition'] = 'attachment; filename="siem-report.csv"'

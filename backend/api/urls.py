@@ -52,6 +52,7 @@ urlpatterns = [
     # Rules endpoints
     path('rules/', views.rules_list, name='rules-list'),
     path('rules/reset/', views.rules_reset, name='rules-reset'),
+    path('rules/from-decision/', views.rule_from_decision, name='rule-from-decision'),
     path('rules/<int:rule_id>/', views.rule_detail, name='rule-detail'),
     path('rules/<int:rule_id>/toggle/', views.rule_toggle, name='rule-toggle'),
 

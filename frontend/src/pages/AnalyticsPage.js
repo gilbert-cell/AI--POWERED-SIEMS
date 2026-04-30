@@ -107,7 +107,7 @@ const AnalyticsPage = () => {
     setIsLive(range === 'live');
     setDateRange(range === 'live' ? '1h' : range);
     if (range === 'live') {
-      liveRef.current = setInterval(fetchAnalyticsData, 5000);
+      liveRef.current = setInterval(fetchAnalyticsData, 20000);
     }
   };
 

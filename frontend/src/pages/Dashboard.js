@@ -59,6 +59,7 @@ const Dashboard = () => {
       ]);
 
       setStats(statsRes.data);
+      console.log('Stats data:', statsRes.data);
       setSourceStats(sourceStatsRes.data);
       // backend returns { trends: [...] }
       setTrends(trendsRes.data?.trends ?? []);
@@ -80,14 +81,14 @@ const Dashboard = () => {
     setTimeRange(range);
     setIsLive(range === 'live');
     if (range === 'live') {
-      liveRef.current = setInterval(fetchDashboardData, 5000);
+      liveRef.current = setInterval(fetchDashboardData, 20000);
     }
   };
 
   useEffect(() => {
     fetchDashboardData();
     // Start live by default
-    liveRef.current = setInterval(fetchDashboardData, 5000);
+    liveRef.current = setInterval(fetchDashboardData, 20000);
     setIsLive(true);
     return () => { if (liveRef.current) clearInterval(liveRef.current); };
   }, []);
@@ -172,7 +173,7 @@ const Dashboard = () => {
                 False Positives
               </Typography>
               <Typography variant="h5" sx={{ fontWeight: 'bold', color: '#7b1fa2' }}>
-                {stats?.false_positives || 0}
+                {(() => { console.log('Rendering false_positives:', stats?.false_positives); return stats?.false_positives || 0; })()}
               </Typography>
             </CardContent>
           </Card>

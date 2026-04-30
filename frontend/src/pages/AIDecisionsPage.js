@@ -5,8 +5,8 @@ import {
   Button, CircularProgress, Chip, Dialog, DialogTitle, DialogContent,
   DialogActions, Slider, Alert, Tabs, Tab,
 } from '@mui/material';
-import { Refresh as RefreshIcon, Edit as EditIcon } from '@mui/icons-material';
-import { aiService } from '../services/api';
+import { Refresh as RefreshIcon, Edit as EditIcon, AddCircleOutline as AddRuleIcon } from '@mui/icons-material';
+import { aiService, rulesService } from '../services/api';
 import { toast } from 'react-toastify';
 
 const ACTION_COLORS = {
@@ -81,13 +81,13 @@ const AIDecisionsPage = () => {
       fetchDecisions();
     } else if (activeTab === 1) {
       fetchAdvanced(true);
-      const interval = setInterval(() => fetchAdvanced(false), 30000);
+      const interval = setInterval(() => fetchAdvanced(false), 20000);
       return () => clearInterval(interval);
     } else if (activeTab === 2) {
       fetchModels();
     } else {
       fetchAccuracy();
-      const interval = setInterval(fetchAccuracy, 10000);
+      const interval = setInterval(fetchAccuracy, 20000);
       return () => clearInterval(interval);
     }
   }, [activeTab, fetchAccuracy, fetchAdvanced, fetchDecisions, fetchModels]);
@@ -108,6 +108,19 @@ const AIDecisionsPage = () => {
       fetchModels();
     } catch (error) {
       toast.error('Failed to update model weights');
+    }
+  };
+
+  const handleCreateRule = async (attackType, source, score) => {
+    try {
+      const res = await rulesService.createFromDecision({ attack_type: attackType, source, score });
+      if (res.data.status === 'exists') {
+        toast.info(`Rule already exists: ${res.data.rule.name}`);
+      } else {
+        toast.success(`Rule created: ${res.data.rule.name}`);
+      }
+    } catch {
+      toast.error('Failed to create rule');
     }
   };
 
@@ -133,6 +146,7 @@ const AIDecisionsPage = () => {
                     <TableCell sx={{ fontWeight: 'bold' }}>Source</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>Score</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>Decision</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold' }}>Rule</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -162,6 +176,13 @@ const AIDecisionsPage = () => {
                           color={d.decision === 'threat' ? 'error' : 'success'}
                           size="small" sx={{ textTransform: 'uppercase' }}
                         />
+                      </TableCell>
+                      <TableCell>
+                        <Button size="small" startIcon={<AddRuleIcon />}
+                          onClick={() => handleCreateRule(d.attack_type || d.secondary_decision, d.source, d.score ?? d.confidence / 100)}
+                          sx={{ color: '#1a237e', fontSize: 11, whiteSpace: 'nowrap' }}>
+                          → Rule
+                        </Button>
                       </TableCell>
                     </TableRow>
                   )) : (
@@ -200,6 +221,7 @@ const AIDecisionsPage = () => {
                     <TableCell sx={{ fontWeight: 'bold' }}>Type of Attack</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>Action</TableCell>
                     <TableCell sx={{ fontWeight: 'bold' }}>Remediation</TableCell>
+                    <TableCell sx={{ fontWeight: 'bold' }}>Rule</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -215,6 +237,13 @@ const AIDecisionsPage = () => {
                           sx={{ backgroundColor: ACTION_COLORS[row.action] || '#666', color: 'white', fontWeight: 'bold' }} />
                       </TableCell>
                       <TableCell sx={{ fontSize: 12, color: '#444' }}>{row.remediation}</TableCell>
+                      <TableCell>
+                        <Button size="small" startIcon={<AddRuleIcon />}
+                          onClick={() => handleCreateRule(row.attack_type, row.source, row.score)}
+                          sx={{ color: '#1a237e', fontSize: 11, whiteSpace: 'nowrap' }}>
+                          → Rule
+                        </Button>
+                      </TableCell>
                     </TableRow>
                   )) : (
                     <TableRow>

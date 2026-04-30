@@ -118,7 +118,14 @@ def load_dataset_to_logs(csv_filename: str = "UNSW_NB15_training-set.csv", max_r
     }
 
     for _, row in rows_to_load.iterrows():
-        source = str(row.get("service") or row.get("proto") or "UNSW_NB15")[:50]
+        # Use attack category as source — service field is often '-' in UNSW dataset
+        raw_cat = str(attack_cat).strip().lower()
+        source = {
+            'exploits': 'ids-system', 'backdoor': 'ids-system', 'shellcode': 'ids-system',
+            'worms': 'network-monitor', 'reconnaissance': 'network-monitor',
+            'dos': 'firewall', 'fuzzers': 'web-server', 'generic': 'network-monitor',
+            'analysis': 'ids-system', 'normal': 'auth-service',
+        }.get(raw_cat, proto if proto not in ('-', '') else 'network-monitor')
         attack_cat = str(row.get("attack_cat", "Normal")).strip()
         proto   = str(row.get("proto",    "-")).strip()
         service = str(row.get("service",  "-")).strip()
