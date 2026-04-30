@@ -118,14 +118,6 @@ def load_dataset_to_logs(csv_filename: str = "UNSW_NB15_training-set.csv", max_r
     }
 
     for _, row in rows_to_load.iterrows():
-        # Use attack category as source — service field is often '-' in UNSW dataset
-        raw_cat = str(attack_cat).strip().lower()
-        source = {
-            'exploits': 'ids-system', 'backdoor': 'ids-system', 'shellcode': 'ids-system',
-            'worms': 'network-monitor', 'reconnaissance': 'network-monitor',
-            'dos': 'firewall', 'fuzzers': 'web-server', 'generic': 'network-monitor',
-            'analysis': 'ids-system', 'normal': 'auth-service',
-        }.get(raw_cat, proto if proto not in ('-', '') else 'network-monitor')
         attack_cat = str(row.get("attack_cat", "Normal")).strip()
         proto   = str(row.get("proto",    "-")).strip()
         service = str(row.get("service",  "-")).strip()
@@ -133,6 +125,15 @@ def load_dataset_to_logs(csv_filename: str = "UNSW_NB15_training-set.csv", max_r
         dur     = float(row.get('dur',   0) or 0)
         spkts   = int(row.get('spkts',   0) or 0)
         sbytes  = int(row.get('sbytes',  0) or 0)
+
+        # Use attack category as source; service field is often '-' in UNSW data.
+        raw_cat = attack_cat.lower()
+        source = {
+            'exploits': 'ids-system', 'backdoor': 'ids-system', 'shellcode': 'ids-system',
+            'worms': 'network-monitor', 'reconnaissance': 'network-monitor',
+            'dos': 'firewall', 'fuzzers': 'web-server', 'generic': 'network-monitor',
+            'analysis': 'ids-system', 'normal': 'auth-service',
+        }.get(raw_cat, proto if proto not in ('-', '') else 'network-monitor')
 
         message = (
             f"Attack Category: {attack_cat} | Protocol: {proto} | Service: {service} | "
