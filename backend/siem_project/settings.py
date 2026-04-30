@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 from dotenv import load_dotenv
-import dj_database_url
 
 # Build paths inside the project
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -89,14 +88,35 @@ def normalize_database_url(value):
     return url
 
 
-DATABASE_URL = normalize_database_url(os.getenv('DATABASE_URL'))
+def describe_database_url(value):
+    url = (value or '').strip().strip('"').strip("'")
+    if not url:
+        return 'empty'
+    scheme = urlsplit(url).scheme.lower()
+    if scheme:
+        return f'uses unsupported scheme "{scheme}"'
+    return 'has no URL scheme'
+
+
+def get_database_url():
+    for env_name in ('DATABASE_URL', 'POSTGRES_URL', 'POSTGRESQL_URL', 'RENDER_DATABASE_URL'):
+        database_url = normalize_database_url(os.getenv(env_name))
+        if database_url:
+            return database_url, env_name
+    return '', 'DATABASE_URL'
+
+
+DATABASE_URL, DATABASE_URL_ENV = get_database_url()
 if DATABASE_URL:
     database_scheme = urlsplit(DATABASE_URL).scheme.lower()
     if database_scheme not in SUPPORTED_DATABASE_SCHEMES:
         raise RuntimeError(
-            'DATABASE_URL must start with a supported database scheme '
-            'such as postgres:// or postgresql://.'
+            f'{DATABASE_URL_ENV} {describe_database_url(DATABASE_URL)}. '
+            'Set it to the full Render Postgres Internal Database URL, '
+            'which starts with postgres:// or postgresql://.'
         )
+
+    import dj_database_url
 
     DATABASES = {
         'default': dj_database_url.parse(
@@ -106,7 +126,10 @@ if DATABASE_URL:
         )
     }
 elif RENDER_EXTERNAL_HOSTNAME:
-    raise RuntimeError('DATABASE_URL must be set to a valid database URL in production.')
+    raise RuntimeError(
+        'DATABASE_URL must be set to the full Render Postgres Internal Database URL '
+        'in production. It should start with postgres:// or postgresql://.'
+    )
 else:
     DATABASES = {
         'default': {
