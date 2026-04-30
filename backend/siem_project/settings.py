@@ -4,6 +4,7 @@ Django settings for siem_project project.
 
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 from dotenv import load_dotenv
 import dj_database_url
 
@@ -69,8 +70,34 @@ TEMPLATES = [
 WSGI_APPLICATION = 'siem_project.wsgi.application'
 
 # Database Configuration
-DATABASE_URL = (os.getenv('DATABASE_URL') or '').strip()
+SUPPORTED_DATABASE_SCHEMES = {
+    'cockroach', 'mssql', 'mssqlms', 'mysql', 'mysql-connector',
+    'mysql2', 'mysqlgis', 'oracle', 'oraclegis', 'pgsql', 'postgis',
+    'postgres', 'postgresql', 'redshift', 'spatialite', 'sqlite',
+    'timescale', 'timescalegis',
+}
+
+
+def normalize_database_url(value):
+    url = (value or '').strip().strip('"').strip("'")
+    if not url:
+        return ''
+    if url.startswith('//'):
+        return f'postgres:{url}'
+    if '://' not in url and '@' in url and '/' in url:
+        return f'postgres://{url}'
+    return url
+
+
+DATABASE_URL = normalize_database_url(os.getenv('DATABASE_URL'))
 if DATABASE_URL:
+    database_scheme = urlsplit(DATABASE_URL).scheme.lower()
+    if database_scheme not in SUPPORTED_DATABASE_SCHEMES:
+        raise RuntimeError(
+            'DATABASE_URL must start with a supported database scheme '
+            'such as postgres:// or postgresql://.'
+        )
+
     DATABASES = {
         'default': dj_database_url.parse(
             DATABASE_URL,
