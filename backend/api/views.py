@@ -291,6 +291,90 @@ def get_sample_logs():
     return sample_logs
 
 
+def load_builtin_demo_logs(max_rows=100):
+    """Create demo SIEM logs when the large CSV dataset is not deployed."""
+    from .models import Log, Anomaly
+
+    event_type_map = {
+        'Generic Attack': 'GENERIC_ATTACK',
+        'Exploits': 'EXPLOIT_ATTEMPT',
+        'Fuzzers': 'FUZZER',
+        'DoS Attack': 'DOS_ATTACK',
+        'Reconnaissance': 'RECONNAISSANCE',
+        'Analysis': 'RECONNAISSANCE',
+        'Backdoor': 'BACKDOOR',
+        'Shellcode': 'SHELLCODE',
+        'Worms': 'WORM',
+    }
+    severity_to_level = {
+        'low': 'INFO',
+        'medium': 'WARNING',
+        'high': 'ERROR',
+        'critical': 'CRITICAL',
+    }
+    severity_scores = {
+        'LOW': 0.10,
+        'MEDIUM': 0.55,
+        'HIGH': 0.78,
+        'CRITICAL': 0.93,
+    }
+
+    samples = get_sample_logs()
+    loaded = 0
+    anomalies_created = 0
+
+    for i in range(max_rows):
+        sample = samples[i % len(samples)]
+        display_event = sample.get('event_type', 'Generic Attack')
+        event_type = event_type_map.get(display_event, normalize_event_type(sample.get('message', '')))
+        severity = (sample.get('severity') or 'low').upper()
+        level = severity_to_level.get(sample.get('severity', 'low').lower(), 'INFO')
+        attack_category = normalize_attack_category(event_type, display_event)
+        defs = _EVENT_DEFAULTS.get(event_type, {})
+
+        log = Log.objects.create(
+            source=sample.get('source', 'network-monitor'),
+            message=sample.get('message', ''),
+            level=level,
+            event_type=event_type,
+            severity=severity,
+            attack_category=attack_category,
+            protocol=sample.get('raw_data', {}).get('protocol', defs.get('protocol', '')),
+            service=defs.get('service', ''),
+            state=defs.get('state', ''),
+            src_ip=sample.get('source_ip'),
+            dst_ip=sample.get('destination_ip'),
+            port=sample.get('raw_data', {}).get('port') or defs.get('port'),
+            duration=defs.get('duration', (0.1, 0.5))[0],
+            packets_sent=defs.get('packets', (3, 8))[1],
+            bytes_sent=defs.get('bytes', (300, 900))[1],
+            anomaly_score=severity_scores.get(severity, 0.10),
+        )
+
+        if severity in {'MEDIUM', 'HIGH', 'CRITICAL'}:
+            score = severity_scores.get(severity, 0.55)
+            Anomaly.objects.create(
+                log=log,
+                anomaly_type=display_event,
+                score=score,
+                details='Built-in demo event generated because CSV dataset is not deployed.',
+                status='confirmed',
+            )
+            anomalies_created += 1
+
+        loaded += 1
+
+    return {
+        'loaded_logs': loaded,
+        'max_rows': max_rows,
+        'dataset': 'built-in-demo',
+        'anomalies_created': anomalies_created,
+        'false_positives': 0,
+        'true_positives': anomalies_created,
+        'false_positive_rate': 0,
+    }
+
+
 def get_real_logs_from_db(limit=100):
     """Get real logs from the database or fallback to sample logs"""
     from .models import Log
@@ -1368,7 +1452,9 @@ def ai_load_dataset(request):
         result = load_dataset_to_logs(max_rows=max_rows)
         return JsonResponse(result)
     except FileNotFoundError as e:
-        return JsonResponse({'error': str(e)}, status=404)
+        result = load_builtin_demo_logs(max_rows=max_rows)
+        result['warning'] = str(e)
+        return JsonResponse(result)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=400)
 
@@ -2011,5 +2097,4 @@ def analytics_export(request):
             log['timestamp'], log['duplicate'], log['false_positive'],
         ])
     return response
-
 
