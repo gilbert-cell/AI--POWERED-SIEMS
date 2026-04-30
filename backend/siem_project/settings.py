@@ -69,9 +69,17 @@ TEMPLATES = [
 WSGI_APPLICATION = 'siem_project.wsgi.application'
 
 # Database Configuration
-DATABASE_URL = os.getenv('DATABASE_URL')
+DATABASE_URL = (os.getenv('DATABASE_URL') or '').strip()
 if DATABASE_URL:
-    DATABASES = {'default': dj_database_url.config(default=DATABASE_URL, conn_max_age=600)}
+    DATABASES = {
+        'default': dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=600,
+            ssl_require=not DEBUG,
+        )
+    }
+elif RENDER_EXTERNAL_HOSTNAME:
+    raise RuntimeError('DATABASE_URL must be set to a valid database URL in production.')
 else:
     DATABASES = {
         'default': {
