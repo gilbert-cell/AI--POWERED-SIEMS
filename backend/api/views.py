@@ -6,7 +6,17 @@ from datetime import datetime, timedelta
 import json
 import re
 
-from .ai_model import load_dataset_to_logs, preview_dataset, predict_record, train_model, load_model_artifact, train_siem_model, train_isolation_forest, if_score_record
+from .ai_model import (
+    load_dataset_to_logs,
+    preview_dataset,
+    predict_record,
+    train_model,
+    train_hybrid_models,
+    load_model_artifact,
+    train_siem_model,
+    train_isolation_forest,
+    if_score_record,
+)
 
 def _safe_float(v):
     try: return float(v)
@@ -1392,27 +1402,52 @@ def ai_accuracy(request):
 def ai_train(request):
     try:
         data = json.loads(request.body) if request.body else {}
-        mode = data.get('mode', 'siem')  # 'siem', 'unsw', or 'isolation_forest'
+        mode = data.get('mode', 'hybrid')  # 'hybrid', 'unsw', 'siem', or 'isolation_forest'
         if mode == 'unsw':
             dataset_filename = data.get('dataset', 'UNSW_NB15_training-set.csv')
             result = train_model(csv_filename=dataset_filename)
+            response = {
+                'status': 'trained',
+                'message': f'Random Forest model trained successfully (dataset={dataset_filename}).',
+                'accuracy': result['accuracy'],
+                'feature_count': result['feature_count'],
+                'model_path': result['model_path'],
+            }
         elif mode == 'isolation_forest':
             result = train_isolation_forest()
-            return JsonResponse({
+            response = {
                 'status': 'trained',
                 'message': 'Isolation Forest model trained successfully.',
                 'feature_count': result['feature_count'],
                 'model_path': result['model_path'],
-            })
-        else:
+            }
+        elif mode == 'siem':
             result = train_siem_model()
-        return JsonResponse({
-            'status': 'trained',
-            'message': f'AI model trained successfully (mode={mode}).',
-            'accuracy': result['accuracy'],
-            'feature_count': result['feature_count'],
-            'model_path': result['model_path'],
-        })
+            response = {
+                'status': 'trained',
+                'message': 'SIEM synthetic model trained successfully.',
+                'accuracy': result['accuracy'],
+                'feature_count': result['feature_count'],
+                'model_path': result['model_path'],
+            }
+        elif mode in ('hybrid', 'both'):
+            dataset_filename = data.get('dataset', 'UNSW_NB15_training-set.csv')
+            result = train_hybrid_models(csv_filename=dataset_filename)
+            response = {
+                'status': 'trained',
+                'message': f'Hybrid training complete using {dataset_filename}.',
+                'trained_models': result['trained_models'],
+                'rf_accuracy': result['rf_accuracy'],
+                'rf_feature_count': result['rf_feature_count'],
+                'rf_model_path': result['rf_model_path'],
+                'if_model_path': result['if_model_path'],
+                'if_feature_count': result['if_feature_count'],
+                'if_training_samples': result['if_training_samples'],
+            }
+        else:
+            raise ValueError(f'Unknown training mode: {mode}')
+
+        return JsonResponse(response)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=400)
 

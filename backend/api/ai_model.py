@@ -61,6 +61,22 @@ def train_model(csv_filename: str = "UNSW_NB15_training-set.csv") -> dict:
     }
 
 
+def train_hybrid_models(csv_filename: str = "UNSW_NB15_training-set.csv") -> dict:
+    """Train both the supervised Random Forest model and the unsupervised Isolation Forest model."""
+    rf_stats = train_model(csv_filename=csv_filename)
+    if_stats = train_isolation_forest(csv_filename=csv_filename)
+
+    return {
+        "trained_models": ["random_forest", "isolation_forest"],
+        "rf_model_path": rf_stats["model_path"],
+        "rf_accuracy": rf_stats["accuracy"],
+        "rf_feature_count": rf_stats["feature_count"],
+        "if_model_path": if_stats["model_path"],
+        "if_feature_count": if_stats["feature_count"],
+        "if_training_samples": if_stats["training_samples"],
+    }
+
+
 def load_model_artifact() -> dict | None:
     if MODEL_PATH.exists():
         return joblib.load(MODEL_PATH)
@@ -367,6 +383,17 @@ def if_score_record(record: dict) -> float | None:
         return None
 
 
+def _compute_hybrid_score(rf_score: float, if_score: float, rf_weight: float = 0.6, if_weight: float = 0.4) -> float:
+    return round(min(max(rf_weight * rf_score + if_weight * if_score, 0.0), 1.0), 3)
+
+
+def _record_has_if_features(record: dict) -> bool:
+    return any(key in record for key in [
+        'duration', 'packets_sent', 'bytes_sent',
+        'dur', 'spkts', 'sbytes', 'dpkts', 'dbytes',
+    ])
+
+
 def score_siem_log(duration: float, packets_sent: int, bytes_sent: int) -> float | None:
     """Convenience function: score a live SIEM log directly from its ML features."""
     return if_score_record({
@@ -393,7 +420,20 @@ def predict_record(record: dict) -> dict:
     prediction = model.predict(data_frame)
     response = {"threat": int(prediction[0])}
 
+    rf_score = None
     if hasattr(model, "predict_proba"):
-        response["probabilities"] = model.predict_proba(data_frame)[0].tolist()
+        proba = model.predict_proba(data_frame)[0].tolist()
+        response["probabilities"] = proba
+        rf_score = float(proba[1]) if len(proba) > 1 else float(proba[0])
+    else:
+        rf_score = float(prediction[0])
+
+    response["rf_score"] = round(min(max(rf_score, 0.0), 1.0), 3)
+
+    if _record_has_if_features(record):
+        if_score = if_score_record(record)
+        if if_score is not None:
+            response["if_score"] = if_score
+            response["hybrid_score"] = _compute_hybrid_score(response["rf_score"], if_score)
 
     return response

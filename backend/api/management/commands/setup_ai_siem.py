@@ -4,7 +4,7 @@ Orchestrates: Model Training → Dataset Loading → Real Predictions → Anomal
 """
 from django.core.management.base import BaseCommand
 from django.utils import timezone
-from api.ai_model import train_model, load_dataset_to_logs, predict_record
+from api.ai_model import train_hybrid_models, load_dataset_to_logs, predict_record
 from api.models import Log, Anomaly
 import pandas as pd
 from pathlib import Path
@@ -65,15 +65,18 @@ class Command(BaseCommand):
         )
 
     def train_model(self):
-        self.stdout.write(self.style.WARNING('\n→ Training ML model from UNSW_NB15 dataset...'))
+        self.stdout.write(self.style.WARNING('\n→ Training Random Forest and Isolation Forest models from UNSW_NB15 dataset...'))
         try:
-            result = train_model()
+            result = train_hybrid_models()
             self.stdout.write(
                 self.style.SUCCESS(
-                    f'✓ Model trained successfully!\n'
-                    f'  Accuracy: {result["accuracy"]:.4f}\n'
-                    f'  Features: {result["feature_count"]}\n'
-                    f'  Path: {result["model_path"]}'
+                    f'✓ Hybrid training completed!\n'
+                    f'  Random Forest accuracy: {result["rf_accuracy"]:.4f}\n'
+                    f'  Random Forest features: {result["rf_feature_count"]}\n'
+                    f'  Isolation Forest features: {result["if_feature_count"]}\n'
+                    f'  Isolation Forest training samples: {result["if_training_samples"]}\n'
+                    f'  RF path: {result["rf_model_path"]}\n'
+                    f'  IF path: {result["if_model_path"]}'
                 )
             )
         except Exception as e:
