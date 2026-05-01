@@ -102,10 +102,27 @@ const Dashboard = () => {
   }
 
   return (
-    <Container maxWidth="xl" sx={{ py: 4 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 3, flexWrap: 'wrap', gap: 2 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          <Typography variant="h4" sx={{ fontWeight: 'bold', color: '#1a237e' }}>
+    <Container maxWidth="xl" sx={{ py: { xs: 2, sm: 3, md: 4 }, px: { xs: 2, sm: 3 } }}>
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: { xs: 'flex-start', sm: 'center' },
+          justifyContent: 'space-between',
+          mb: { xs: 2, sm: 3 },
+          flexDirection: { xs: 'column', sm: 'row' },
+          gap: { xs: 1.5, sm: 2 },
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
+          <Typography
+            variant="h4"
+            sx={{
+              fontWeight: 'bold',
+              color: '#1a237e',
+              fontSize: { xs: '2rem', sm: '2.125rem' },
+              lineHeight: 1.15,
+            }}
+          >
             Dashboard
           </Typography>
           {isLive && (
@@ -116,8 +133,8 @@ const Dashboard = () => {
             </Box>
           )}
         </Box>
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-          <FormControl size="small" sx={{ minWidth: 150 }}>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', width: { xs: '100%', sm: 'auto' } }}>
+          <FormControl size="small" sx={{ minWidth: { xs: 0, sm: 150 }, flex: { xs: 1, sm: 'initial' } }}>
             <InputLabel sx={{ color: '#1a237e' }}>Time Range</InputLabel>
             <Select value={timeRange} label="Time Range"
               onChange={(e) => handleTimeRange(e.target.value)}
@@ -129,7 +146,7 @@ const Dashboard = () => {
             </Select>
           </FormControl>
           <Tooltip title="Refresh now">
-            <IconButton onClick={fetchDashboardData} sx={{ border: '1px solid #ddd' }}>
+            <IconButton onClick={fetchDashboardData} sx={{ border: '1px solid #ddd', flexShrink: 0 }}>
               <RefreshIcon />
             </IconButton>
           </Tooltip>

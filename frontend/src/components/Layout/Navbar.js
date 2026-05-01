@@ -13,9 +13,10 @@ import {
 import {
   Notifications as NotificationsIcon,
   Settings as SettingsIcon,
+  Menu as MenuIcon,
 } from '@mui/icons-material';
 
-const Navbar = ({ onLogout }) => {
+const Navbar = ({ onLogout, onMenuClick }) => {
   const navigate = useNavigate();
   const [anchorEl, setAnchorEl] = React.useState(null);
 
@@ -44,12 +45,46 @@ const Navbar = ({ onLogout }) => {
 
   return (
     <AppBar position="sticky" sx={{ backgroundColor: '#1a237e' }}>
-      <Toolbar>
-        <Typography variant="h6" sx={{ flexGrow: 1, fontWeight: 'bold', color: '#ffffff', textAlign: 'center' }}>
-          AI-POWERED SECURITY INFORMATION AND EVENT MANAGEMENT SYSTEM
+      <Toolbar
+        sx={{
+          minHeight: { xs: 56, sm: 64 },
+          px: { xs: 1.5, sm: 3 },
+          gap: { xs: 1, sm: 2 },
+        }}
+      >
+        <IconButton
+          color="inherit"
+          aria-label="Open navigation"
+          onClick={onMenuClick}
+          sx={{ display: { xs: 'inline-flex', md: 'none' }, flexShrink: 0 }}
+        >
+          <MenuIcon />
+        </IconButton>
+
+        <Typography
+          variant="h6"
+          sx={{
+            flexGrow: 1,
+            minWidth: 0,
+            fontWeight: 'bold',
+            color: '#ffffff',
+            textAlign: { xs: 'left', md: 'center' },
+            fontSize: { xs: '1.05rem', sm: '1.15rem', md: '1.25rem' },
+            lineHeight: 1.2,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          <Box component="span" sx={{ display: { xs: 'inline', sm: 'none' } }}>
+            AI SIEM
+          </Box>
+          <Box component="span" sx={{ display: { xs: 'none', sm: 'inline' } }}>
+            AI-POWERED SECURITY INFORMATION AND EVENT MANAGEMENT SYSTEM
+          </Box>
         </Typography>
 
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: { xs: 0.5, sm: 2 }, flexShrink: 0 }}>
           <IconButton color="inherit" title="Notifications">
             <NotificationsIcon />
           </IconButton>
@@ -65,7 +100,7 @@ const Navbar = ({ onLogout }) => {
               '&:hover': { opacity: 0.8 },
             }}
           >
-            <Avatar sx={{ width: 35, height: 35, backgroundColor: '#42a5f5' }}>
+            <Avatar sx={{ width: { xs: 32, sm: 35 }, height: { xs: 32, sm: 35 }, backgroundColor: '#42a5f5' }}>
               AD
             </Avatar>
           </IconButton>

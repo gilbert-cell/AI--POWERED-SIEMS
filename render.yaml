@@ -15,9 +15,9 @@ services:
           name: siem-db
           property: connectionString
       - key: FRONTEND_URL
-        value: https://siem-frontend.onrender.com  # update after frontend is deployed
+        value: https://siem-frontend.onrender.com
       - key: ALLOWED_HOSTS
-        value: siem-backend.onrender.com
+        value: siem-backend.onrender.com,ai-powered-siems.onrender.com
 
   - type: web
     name: siem-frontend
@@ -27,7 +27,7 @@ services:
     staticPublishPath: build
     envVars:
       - key: REACT_APP_API_URL
-        value: https://siem-backend.onrender.com  # update with your backend URL
+        value: https://ai-powered-siems.onrender.com/api
     routes:
       - type: rewrite
         source: /*

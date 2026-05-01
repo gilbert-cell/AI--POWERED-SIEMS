@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { Box, Drawer, IconButton } from '@mui/material';
-import { Menu as MenuIcon } from '@mui/icons-material';
+import { Box, Drawer } from '@mui/material';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
@@ -70,27 +69,7 @@ function App() {
           }}
         >
           {/* Navbar */}
-          <Navbar onLogout={handleLogout} />
-
-          {/* Mobile Drawer Toggle */}
-          <Box
-            sx={{
-              display: { xs: 'flex', md: 'none' },
-              p: 1,
-              backgroundColor: 'white',
-              borderBottom: '1px solid #e0e0e0',
-              justifyContent: 'flex-start',
-            }}
-          >
-            <IconButton
-              edge="start"
-              color="inherit"
-              onClick={() => setSidebarOpen(true)}
-              sx={{ color: '#1a237e' }}
-            >
-              <MenuIcon />
-            </IconButton>
-          </Box>
+          <Navbar onLogout={handleLogout} onMenuClick={() => setSidebarOpen(true)} />
 
           {/* Mobile Sidebar */}
           <Drawer
