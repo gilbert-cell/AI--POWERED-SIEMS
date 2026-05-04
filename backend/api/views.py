@@ -250,6 +250,22 @@ AUTH_DEFAULT_PASSWORD = os.getenv('DEFAULT_ADMIN_PASSWORD', 'admin123')
 AUTH_DEFAULT_NAME = os.getenv('DEFAULT_ADMIN_NAME', 'SIEM Admin')
 AUTH_DEFAULT_ROLE = 'System Administrator'
 
+# Additional seeded users from env vars
+_SEED_USERS = [
+    {
+        'email':    os.getenv('DEFAULT_SECURITY_ADMINISTRATOR_EMAIL', os.getenv('DEFAULT_SECURITY ADMINISTRATOR_EMAIL', '')),
+        'password': os.getenv('DEFAULT_SECURITY_ADMINISTRATOR_PASSWORD', os.getenv('DEFAULT_SECURITY ADMINISTRATOR_PASSWORD', '')),
+        'name':     os.getenv('DEFAULT_SECURITY_ADMINISTRATOR_NAME', os.getenv('DEFAULT_SECURITY ADMINISTRATOR_NAME', 'Security Administrator')),
+        'role':     'Security Administrator',
+    },
+    {
+        'email':    os.getenv('DEFAULT_AUDITOR_EMAIL', ''),
+        'password': os.getenv('DEFAULT_AUDITOR_PASSWORD', os.getenv('EFAULT_AUDITOR_PASSWORD', '')),
+        'name':     os.getenv('DEFAULT_AUDITOR_NAME', 'Auditor'),
+        'role':     'Auditor',
+    },
+]
+
 
 def _split_name(name):
     parts = (name or '').strip().split(None, 1)
@@ -294,20 +310,38 @@ def _serialize_user(user):
     }
 
 
-def ensure_default_auth_user():
-    default_user = User.objects.filter(email__iexact=AUTH_DEFAULT_EMAIL).first()
-    if default_user is None:
-        first_name, last_name = _split_name(AUTH_DEFAULT_NAME)
-        default_user = User.objects.create_user(
-            username=AUTH_DEFAULT_EMAIL,
-            email=AUTH_DEFAULT_EMAIL,
-            password=AUTH_DEFAULT_PASSWORD,
+def _seed_user(email, password, name, role, is_superuser=False):
+    """Create a user if they don't exist yet."""
+    if not email or not password:
+        return None
+    user = User.objects.filter(email__iexact=email).first()
+    if user is None:
+        first_name, last_name = _split_name(name)
+        user = User.objects.create_user(
+            username=email,
+            email=email,
+            password=password,
             first_name=first_name,
             last_name=last_name,
-            is_staff=True,
-            is_superuser=True,
+            is_staff=is_superuser,
+            is_superuser=is_superuser,
         )
-    _get_or_create_profile(default_user)
+    profile = _get_or_create_profile(user)
+    profile.role = role
+    profile.status = 'active'
+    profile.save(update_fields=['role', 'status'])
+    return user
+
+
+def ensure_default_auth_user():
+    # Seed primary admin
+    default_user = _seed_user(
+        AUTH_DEFAULT_EMAIL, AUTH_DEFAULT_PASSWORD,
+        AUTH_DEFAULT_NAME, AUTH_DEFAULT_ROLE, is_superuser=True,
+    )
+    # Seed additional users from env vars
+    for u in _SEED_USERS:
+        _seed_user(u['email'], u['password'], u['name'], u['role'])
     return default_user
 
 
