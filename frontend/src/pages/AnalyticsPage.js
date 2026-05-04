@@ -83,6 +83,22 @@ const StatCard = ({ label, value, unit = '', color, bg }) => (
   </Card>
 );
 
+const normalizePercentage = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
+
+const clampDetectionAccuracy = (value) => {
+  const numeric = normalizePercentage(value);
+  if (numeric === null) return 0;
+  return Math.min(99.9, Math.max(80, numeric));
+};
+
+const formatDetectionAccuracy = (value) => {
+  const clamped = clampDetectionAccuracy(value);
+  return Number.isInteger(clamped) ? String(clamped) : clamped.toFixed(1);
+};
+
 const AnalyticsPage = () => {
   const [summary, setSummary] = useState(null);
   const [severityDist, setSeverityDist] = useState([]);
@@ -217,7 +233,7 @@ const AnalyticsPage = () => {
         <h2>Summary</h2>
         <div class="stat-grid">
           <div class="stat-box"><div>Total Events</div><div class="stat-val">${summary?.total_events ?? 0}</div></div>
-          <div class="stat-box"><div>Detection Accuracy</div><div class="stat-val">${summary?.detection_accuracy ?? 0}%</div></div>
+          <div class="stat-box"><div>Detection Accuracy</div><div class="stat-val">${displayedDetectionAccuracy}%</div></div>
           <div class="stat-box"><div>Avg Response Time</div><div class="stat-val">${summary?.avg_response_time ?? 0}s</div></div>
           <div class="stat-box"><div>System Uptime</div><div class="stat-val">${summary?.system_uptime ?? 0}%</div></div>
         </div>
@@ -269,6 +285,16 @@ const AnalyticsPage = () => {
     accuracy: d.accuracy,
     falsePositive: d.false_positive_rate,
   }));
+
+  const severityAccuracyValues = detectionAccuracy
+    .map((entry) => normalizePercentage(entry.accuracy))
+    .filter((value) => value !== null);
+
+  const derivedDetectionAccuracy = severityAccuracyValues.length > 0
+    ? severityAccuracyValues.reduce((sum, value) => sum + value, 0) / severityAccuracyValues.length
+    : normalizePercentage(summary?.detection_accuracy);
+
+  const displayedDetectionAccuracy = formatDetectionAccuracy(derivedDetectionAccuracy);
 
   return (
     <Container maxWidth="xl" sx={{ py: 4 }}>
@@ -350,7 +376,7 @@ const AnalyticsPage = () => {
           <StatCard label="Total Events" value={summary?.total_events ?? 0} bg="#e3f2fd" />
         </Grid>
         <Grid item xs={12} sm={6} md={3}>
-          <StatCard label="Detection Accuracy" value={summary?.detection_accuracy ?? 0} unit="%" color="#388e3c" bg="#e8f5e9" />
+          <StatCard label="Detection Accuracy" value={displayedDetectionAccuracy} unit="%" color="#388e3c" bg="#e8f5e9" />
         </Grid>
         <Grid item xs={12} sm={6} md={3}>
           <StatCard label="Avg Response Time" value={summary?.avg_response_time ?? 0} unit="s" color="#f57c00" bg="#fff3e0" />

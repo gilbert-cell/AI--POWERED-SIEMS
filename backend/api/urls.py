@@ -46,6 +46,7 @@ urlpatterns = [
     path('ai/dataset/load/', views.ai_load_dataset, name='ai-dataset-load'),
     
     # Anomaly management endpoints
+    path('anomalies/inject/', views.inject_real_anomaly, name='inject-real-anomaly'),
     path('anomalies/<int:anomaly_id>/mark-false-positive/', views.mark_anomaly_false_positive, name='mark-anomaly-false-positive'),
     path('anomalies/<int:anomaly_id>/confirm-threat/', views.confirm_anomaly_threat, name='confirm-anomaly-threat'),
     

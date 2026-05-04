@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { Box, Drawer } from '@mui/material';
+import { Box, Button, Card, CardContent, Container, Drawer, Typography } from '@mui/material';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
@@ -19,21 +19,90 @@ import ProfilePage from './pages/ProfilePage';
 import SettingsPage from './pages/SettingsPage';
 import AdminDashboard from './pages/AdminDashboard';
 import LogDetailsPage from './pages/LogDetailsPage';
+import LogViewerDashboard from './pages/LogViewerDashboard';
+import AuthPage from './pages/AuthPage';
+import { canAccessPath, getStoredRole, ROLE_CHANGE_EVENT } from './utils/rbac';
+import { AUTH_CHANGE_EVENT, isAuthenticated, logoutUser } from './utils/auth';
 
 // Styles
 import './App.css';
 
 const DRAWER_WIDTH = 260;
 
+const AccessDenied = ({ role }) => (
+  <Container maxWidth="md" sx={{ py: { xs: 3, md: 6 } }}>
+    <Card>
+      <CardContent sx={{ p: { xs: 3, sm: 4 } }}>
+        <Typography variant="h4" sx={{ mb: 1, fontWeight: 'bold', color: '#1a237e' }}>
+          Access Restricted
+        </Typography>
+        <Typography color="textSecondary" sx={{ mb: 3 }}>
+          The current role, {role}, does not have permission to view this area.
+        </Typography>
+        <Button variant="contained" href="/dashboard" sx={{ backgroundColor: '#1a237e' }}>
+          Return to Dashboard
+        </Button>
+      </CardContent>
+    </Card>
+  </Container>
+);
+
+const ProtectedRoute = ({ role, path, children }) => (
+  canAccessPath(role, path) ? children : <AccessDenied role={role} />
+);
+
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [currentRole, setCurrentRole] = useState(getStoredRole());
+  const [authenticated, setAuthenticated] = useState(isAuthenticated());
+
+  React.useEffect(() => {
+    const handleRoleChange = (event) => {
+      setCurrentRole(event.detail || getStoredRole());
+    };
+    const handleAuthChange = () => {
+      setAuthenticated(isAuthenticated());
+      setCurrentRole(getStoredRole());
+    };
+    const handleStorageChange = () => {
+      handleRoleChange({});
+      handleAuthChange();
+    };
+
+    window.addEventListener(ROLE_CHANGE_EVENT, handleRoleChange);
+    window.addEventListener(AUTH_CHANGE_EVENT, handleAuthChange);
+    window.addEventListener('storage', handleStorageChange);
+
+    return () => {
+      window.removeEventListener(ROLE_CHANGE_EVENT, handleRoleChange);
+      window.removeEventListener(AUTH_CHANGE_EVENT, handleAuthChange);
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, []);
 
   const handleLogout = () => {
-    // Clear auth data
-    localStorage.removeItem('auth_token');
-    // Redirect to login (implement as needed)
+    logoutUser();
     window.location.href = '/login';
   };
+
+  if (!authenticated) {
+    return (
+      <Router
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
+        <Routes>
+          <Route path="/login" element={<AuthPage mode="login" />} />
+          <Route path="/register" element={<AuthPage mode="register" />} />
+          <Route path="/forgot-password" element={<AuthPage mode="forgot" />} />
+          <Route path="*" element={<Navigate to="/login" replace />} />
+        </Routes>
+        <ToastContainer position="bottom-right" autoClose={5000} theme="light" />
+      </Router>
+    );
+  }
 
   return (
     <Router
@@ -84,16 +153,20 @@ function App() {
           {/* Pages */}
           <Box sx={{ flexGrow: 1, overflow: 'auto' }}>
             <Routes>
-              <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/logs" element={<LogsPage />} />
-              <Route path="/logs/:source" element={<LogDetailsPage />} />
-              <Route path="/behavior" element={<BehaviorAnalysisPage />} />
-              <Route path="/rules" element={<RulesPage />} />
-              <Route path="/ai-decisions" element={<AIDecisionsPage />} />
-              <Route path="/analytics" element={<AnalyticsPage />} />
-              <Route path="/profile" element={<ProfilePage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/admin" element={<AdminDashboard />} />
+              <Route path="/login" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/register" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/forgot-password" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/dashboard" element={<ProtectedRoute role={currentRole} path="/dashboard"><Dashboard /></ProtectedRoute>} />
+              <Route path="/logs" element={<ProtectedRoute role={currentRole} path="/logs"><LogsPage /></ProtectedRoute>} />
+              <Route path="/log-viewer" element={<ProtectedRoute role={currentRole} path="/log-viewer"><LogViewerDashboard /></ProtectedRoute>} />
+              <Route path="/logs/:source" element={<ProtectedRoute role={currentRole} path="/logs"><LogDetailsPage /></ProtectedRoute>} />
+              <Route path="/behavior" element={<ProtectedRoute role={currentRole} path="/behavior"><BehaviorAnalysisPage /></ProtectedRoute>} />
+              <Route path="/rules" element={<ProtectedRoute role={currentRole} path="/rules"><RulesPage /></ProtectedRoute>} />
+              <Route path="/ai-decisions" element={<ProtectedRoute role={currentRole} path="/ai-decisions"><AIDecisionsPage /></ProtectedRoute>} />
+              <Route path="/analytics" element={<ProtectedRoute role={currentRole} path="/analytics"><AnalyticsPage /></ProtectedRoute>} />
+              <Route path="/profile" element={<ProtectedRoute role={currentRole} path="/profile"><ProfilePage /></ProtectedRoute>} />
+              <Route path="/settings" element={<ProtectedRoute role={currentRole} path="/settings"><SettingsPage /></ProtectedRoute>} />
+              <Route path="/admin" element={<ProtectedRoute role={currentRole} path="/admin"><AdminDashboard /></ProtectedRoute>} />
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
             </Routes>
           </Box>

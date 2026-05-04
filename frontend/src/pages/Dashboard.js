@@ -59,7 +59,6 @@ const Dashboard = () => {
       ]);
 
       setStats(statsRes.data);
-      console.log('Stats data:', statsRes.data);
       setSourceStats(sourceStatsRes.data);
       // backend returns { trends: [...] }
       setTrends(trendsRes.data?.trends ?? []);
@@ -190,7 +189,7 @@ const Dashboard = () => {
                 False Positives
               </Typography>
               <Typography variant="h5" sx={{ fontWeight: 'bold', color: '#7b1fa2' }}>
-                {(() => { console.log('Rendering false_positives:', stats?.false_positives); return stats?.false_positives || 0; })()}
+                {stats?.false_positives || 0}
               </Typography>
             </CardContent>
           </Card>
@@ -230,21 +229,20 @@ const Dashboard = () => {
               </Card>
             </Grid>
           ))
-          : ['network', 'dos', 'intrusion'].map((source) => (
-            <Grid item xs={12} sm={4} key={source}>
-              <Card sx={{ backgroundColor: '#f5f5f5', cursor: 'pointer', '&:hover': { boxShadow: 4, backgroundColor: '#e3f2fd' } }}
-                onClick={() => navigate(`/logs/${source}`)}
-              >
+          : (
+            <Grid item xs={12}>
+              <Card sx={{ backgroundColor: '#f8fafc' }}>
                 <CardContent>
-                  <Typography color="textSecondary" gutterBottom sx={{ textTransform: 'uppercase' }}>
-                    {source} logs
+                  <Typography variant="body1" sx={{ fontWeight: 600, color: '#1a237e', mb: 0.5 }}>
+                    No source metrics available
                   </Typography>
-                  <Typography variant="h5" sx={{ fontWeight: 'bold' }}>0</Typography>
-                  <Typography variant="body2" color="textSecondary">False positives: 0</Typography>
+                  <Typography variant="body2" color="textSecondary">
+                    Source breakdown will appear here once the backend returns aggregated source counts.
+                  </Typography>
                 </CardContent>
               </Card>
             </Grid>
-          ))
+          )
         }
       </Grid>
 

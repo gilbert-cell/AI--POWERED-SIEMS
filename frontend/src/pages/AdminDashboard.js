@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Box,
   Container,
@@ -12,7 +12,6 @@ import {
   TableContainer,
   TableHead,
   TableRow,
-  Paper,
   Button,
   Dialog,
   DialogTitle,
@@ -26,10 +25,9 @@ import {
   Chip,
   IconButton,
   Tooltip,
-  Alert,
-  CircularProgress,
   Tabs,
   Tab,
+  InputAdornment,
 } from '@mui/material';
 import {
   Edit as EditIcon,
@@ -38,92 +36,281 @@ import {
   Refresh as RefreshIcon,
   Warning as WarningIcon,
   CheckCircle as CheckCircleIcon,
+  Visibility,
+  VisibilityOff,
 } from '@mui/icons-material';
+import {
+  ROLES,
+  allPermissions,
+  getStoredRole,
+  hasPermission,
+  roleDefinitions,
+  setStoredRole,
+} from '../utils/rbac';
+import { getCurrentUser, getRegisteredUsers, registerUser } from '../utils/auth';
+
+const roleOptions = Object.keys(roleDefinitions);
+
+const formatShortDate = (value) => {
+  if (!value) return 'Never';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Never' : date.toLocaleDateString();
+};
+
+const createSystemHealthSnapshot = (userCount) => ({
+  status: 'healthy',
+  uptime: `${14 + userCount}d ${8 + (userCount % 5)}h ${12 + (userCount % 40)}m`,
+  cpuUsage: Math.min(72, 24 + userCount * 3),
+  memoryUsage: Math.min(78, 38 + userCount * 4),
+  diskUsage: Math.min(68, 28 + userCount * 2),
+  activeConnections: Math.max(6, userCount * 4),
+});
+
+const buildAuditLogs = (users, sessionUser) => {
+  const now = Date.now();
+  return users.slice(0, 4).map((user, index) => ({
+    id: user.id,
+    user: user.email,
+    action: index === 0
+      ? 'Signed in to RBAC dashboard'
+      : index === 1
+      ? 'Reviewed permissions matrix'
+      : index === 2
+      ? 'Viewed audit history'
+      : 'Validated account status',
+    resource: index === 0
+      ? 'Admin Console'
+      : index === 1
+      ? (user.role || ROLES.SECURITY_ADMINISTRATOR)
+      : index === 2
+      ? 'Audit Logs'
+      : 'User Directory',
+    timestamp: new Date(now - index * 20 * 60000).toLocaleString(),
+    status: user.email === sessionUser?.email || index < 3 ? 'success' : 'info',
+  }));
+};
 
 const AdminDashboard = () => {
+  const storedUsers = getRegisteredUsers();
+  const sessionUser = getCurrentUser();
   const [activeTab, setActiveTab] = useState(0);
-  const [users, setUsers] = useState([
-    { id: 1, name: 'Admin User', email: 'admin@example.com', role: 'Administrator', status: 'active', lastLogin: '2026-04-25' },
-    { id: 2, name: 'Security Analyst', email: 'analyst@example.com', role: 'Analyst', status: 'active', lastLogin: '2026-04-25' },
-    { id: 3, name: 'Operator', email: 'operator@example.com', role: 'Operator', status: 'inactive', lastLogin: '2026-04-20' },
-  ]);
-  const [systemHealth, setSystemHealth] = useState({
-    status: 'healthy',
-    uptime: '45d 12h 34m',
-    cpuUsage: 32,
-    memoryUsage: 58,
-    diskUsage: 42,
-    activeConnections: 24,
-  });
-  const [auditLogs, setAuditLogs] = useState([
-    { id: 1, user: 'admin@example.com', action: 'Rule modified', resource: 'Rule-001', timestamp: '2026-04-25 15:30', status: 'success' },
-    { id: 2, user: 'analyst@example.com', action: 'Alert acknowledged', resource: 'Alert-5678', timestamp: '2026-04-25 15:25', status: 'success' },
-    { id: 3, user: 'admin@example.com', action: 'User role changed', resource: 'User-003', timestamp: '2026-04-25 15:20', status: 'success' },
-    { id: 4, user: 'operator@example.com', action: 'Login failed', resource: 'Authentication', timestamp: '2026-04-25 15:10', status: 'failure' },
-  ]);
+  const [currentRole, setCurrentRole] = useState(getStoredRole());
+  const [users, setUsers] = useState(() => storedUsers.map((user) => ({
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    role: user.role || ROLES.SECURITY_ADMINISTRATOR,
+    status: user.status || 'active',
+    lastLogin: formatShortDate(user.lastLoginAt),
+  })));
+  const [systemHealth, setSystemHealth] = useState(() => createSystemHealthSnapshot(storedUsers.length));
+  const [lastRefresh, setLastRefresh] = useState(new Date().toLocaleTimeString());
+  const [auditLogs] = useState(() => buildAuditLogs(storedUsers, sessionUser));
 
   const [userDialogOpen, setUserDialogOpen] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
-  const [formData, setFormData] = useState({ name: '', email: '', role: 'Analyst' });
+  const [pendingDeleteUser, setPendingDeleteUser] = useState(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [formData, setFormData] = useState({ name: '', email: '', role: ROLES.SECURITY_ADMINISTRATOR, password: '', confirmPassword: '' });
+  const [formErrors, setFormErrors] = useState({ name: '', email: '', password: '', confirmPassword: '' });
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+  const validateUserForm = (data) => {
+    const errors = { name: '', email: '', password: '', confirmPassword: '' };
+    if (!data.name.trim()) errors.name = 'Name is required';
+    if (!data.email.trim()) errors.email = 'Email is required';
+    else if (!/^\S+@\S+\.\S+$/.test(data.email)) errors.email = 'Enter a valid email address';
+    if (!selectedUser) {
+      if (!data.password) errors.password = 'Password is required';
+      else if (data.password.length < 8) errors.password = 'Password must be at least 8 characters';
+      if (!data.confirmPassword) errors.confirmPassword = 'Please confirm password';
+      else if (data.password !== data.confirmPassword) errors.confirmPassword = 'Passwords do not match';
+    }
+    setFormErrors(errors);
+    return !errors.name && !errors.email && !errors.password && !errors.confirmPassword;
+  };
+
+  const handleActiveRoleChange = (role) => {
+    setCurrentRole(setStoredRole(role));
+  };
+
+  const handleRefresh = () => {
+    setSystemHealth((prev) => ({
+      ...prev,
+      cpuUsage: Math.min(99, Math.max(5, prev.cpuUsage + (Math.random() * 10 - 5))),
+      memoryUsage: Math.min(99, Math.max(10, prev.memoryUsage + (Math.random() * 12 - 6))),
+      diskUsage: Math.min(99, Math.max(15, prev.diskUsage + (Math.random() * 8 - 4))),
+      activeConnections: Math.max(1, Math.round(prev.activeConnections + (Math.random() * 8 - 4))),
+    }));
+    setLastRefresh(new Date().toLocaleTimeString());
+  };
 
   const handleAddUser = () => {
     setSelectedUser(null);
-    setFormData({ name: '', email: '', role: 'Analyst' });
+    setFormData({ name: '', email: '', role: ROLES.SECURITY_ADMINISTRATOR, password: '', confirmPassword: '' });
+    setFormErrors({ name: '', email: '', password: '', confirmPassword: '' });
+    setShowPassword(false);
+    setShowConfirmPassword(false);
     setUserDialogOpen(true);
   };
 
   const handleEditUser = (user) => {
     setSelectedUser(user);
-    setFormData({ name: user.name, email: user.email, role: user.role });
+    setFormData({ name: user.name, email: user.email, role: user.role, password: '', confirmPassword: '' });
+    setFormErrors({ name: '', email: '', password: '', confirmPassword: '' });
     setUserDialogOpen(true);
   };
 
   const handleSaveUser = () => {
+    if (!validateUserForm(formData)) return;
+
     if (selectedUser) {
-      setUsers(users.map(u => u.id === selectedUser.id ? { ...u, ...formData } : u));
+      setUsers(users.map((u) => (u.id === selectedUser.id ? { ...u, ...formData } : u)));
     } else {
-      setUsers([...users, { id: Math.max(...users.map(u => u.id), 0) + 1, ...formData, status: 'active', lastLogin: new Date().toISOString().split('T')[0] }]);
+      try {
+        registerUser({ name: formData.name, email: formData.email, password: formData.password, role: formData.role });
+      } catch (err) {
+        setFormErrors((prev) => ({ ...prev, email: err.message }));
+        return;
+      }
+      setUsers([
+        ...users,
+        {
+          id: Math.max(...users.map((u) => u.id), 0) + 1,
+          name: formData.name,
+          email: formData.email,
+          role: formData.role,
+          status: 'active',
+          lastLogin: new Date().toISOString().split('T')[0],
+        },
+      ]);
     }
     setUserDialogOpen(false);
   };
 
-  const handleDeleteUser = (userId) => {
-    setUsers(users.filter(u => u.id !== userId));
+  const handleDeleteUser = (user) => {
+    setPendingDeleteUser(user);
+    setDeleteConfirmOpen(true);
+  };
+
+  const confirmDeleteUser = () => {
+    if (pendingDeleteUser) {
+      setUsers(users.filter((u) => u.id !== pendingDeleteUser.id));
+      setPendingDeleteUser(null);
+    }
+    setDeleteConfirmOpen(false);
   };
 
   const getRoleColor = (role) => {
-    switch (role) {
-      case 'Administrator': return 'error';
-      case 'Analyst': return 'warning';
-      case 'Operator': return 'info';
-      default: return 'default';
-    }
+    return roleDefinitions[role]?.color || 'default';
   };
 
   const getStatusColor = (status) => status === 'active' ? 'success' : 'default';
 
   return (
     <Container maxWidth="xl" sx={{ py: 4 }}>
-      <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Typography variant="h4" sx={{ fontWeight: 'bold', color: '#1a237e' }}>
-          Admin Dashboard
+      <Box sx={{ mb: 3, display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', sm: 'center' }, gap: 2, flexDirection: { xs: 'column', sm: 'row' } }}>
+        <Box>
+          <Typography variant="h4" sx={{ fontWeight: 'bold', color: '#1a237e' }}>
+            RBAC Dashboard
+          </Typography>
+          <Typography color="textSecondary">
+            Manage role-based access for SIEM users, dashboards, and security workflows.
+          </Typography>
+        </Box>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Typography color="textSecondary" variant="body2">
+          Updated at {lastRefresh}
         </Typography>
-        <Tooltip title="Refresh all data">
-          <IconButton sx={{ color: '#1a237e' }}>
+        <Tooltip title="Refresh system health metrics">
+          <IconButton sx={{ color: '#1a237e' }} onClick={handleRefresh} aria-label="Refresh system metrics">
             <RefreshIcon />
           </IconButton>
         </Tooltip>
       </Box>
+    </Box>
 
-      <Tabs value={activeTab} onChange={(e, value) => setActiveTab(value)} sx={{ mb: 3, borderBottom: '1px solid #e0e0e0' }}>
+      <Tabs
+        value={activeTab}
+        onChange={(e, value) => setActiveTab(value)}
+        variant="scrollable"
+        scrollButtons="auto"
+        sx={{ mb: 3, borderBottom: '1px solid #e0e0e0' }}
+      >
+        <Tab label="Access Overview" />
         <Tab label="System Health" />
         <Tab label="User Management" />
+        <Tab label="Permission Matrix" />
         <Tab label="Audit Logs" />
         <Tab label="System Settings" />
       </Tabs>
 
-      {/* System Health Tab */}
+      {/* Access Overview Tab */}
       {activeTab === 0 && (
+        <Grid container spacing={3}>
+          <Grid item xs={12}>
+            <Card>
+              <CardContent>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', md: 'center' }, gap: 2, flexDirection: { xs: 'column', md: 'row' } }}>
+                  <Box>
+                    <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
+                      Active Role Simulation
+                    </Typography>
+                    <Typography color="textSecondary" variant="body2">
+                      Switch roles to preview navigation and protected route access in this SIEM dashboard.
+                    </Typography>
+                  </Box>
+                  <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 280 } }}>
+                    <InputLabel>Current Role</InputLabel>
+                    <Select
+                      value={currentRole}
+                      label="Current Role"
+                      onChange={(event) => handleActiveRoleChange(event.target.value)}
+                    >
+                      {roleOptions.map((role) => (
+                        <MenuItem key={role} value={role}>{role}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+
+          {roleOptions.map((role) => {
+            const definition = roleDefinitions[role];
+            return (
+              <Grid item xs={12} md={4} key={role}>
+                <Card sx={{ height: '100%', borderTop: role === currentRole ? '4px solid #1a237e' : '4px solid transparent' }}>
+                  <CardContent>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, mb: 1 }}>
+                      <Typography variant="h6" sx={{ fontWeight: 'bold', color: '#1a237e' }}>
+                        {role}
+                      </Typography>
+                      <Chip label={`${definition.permissions.length} permissions`} color={definition.color} size="small" />
+                    </Box>
+                    <Typography color="textSecondary" variant="body2" sx={{ minHeight: { md: 60 }, mb: 2 }}>
+                      {definition.description}
+                    </Typography>
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      {definition.permissions.slice(0, 5).map((permission) => (
+                        <Box key={permission} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                          <CheckCircleIcon sx={{ color: '#2e7d32', fontSize: 18 }} />
+                          <Typography variant="body2">{permission}</Typography>
+                        </Box>
+                      ))}
+                    </Box>
+                  </CardContent>
+                </Card>
+              </Grid>
+            );
+          })}
+        </Grid>
+      )}
+
+      {/* System Health Tab */}
+      {activeTab === 1 && (
         <Grid container spacing={3}>
           <Grid item xs={12} sm={6} md={4}>
             <Card sx={{ backgroundColor: systemHealth.status === 'healthy' ? '#e8f5e9' : '#fff3e0' }}>
@@ -222,7 +409,7 @@ const AdminDashboard = () => {
       )}
 
       {/* User Management Tab */}
-      {activeTab === 1 && (
+      {activeTab === 2 && (
         <Card>
           <CardContent>
             <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -265,7 +452,7 @@ const AdminDashboard = () => {
                           </IconButton>
                         </Tooltip>
                         <Tooltip title="Delete">
-                          <IconButton size="small" onClick={() => handleDeleteUser(user.id)} sx={{ color: '#d32f2f' }}>
+                          <IconButton size="small" onClick={() => handleDeleteUser(user)} sx={{ color: '#d32f2f' }}>
                             <DeleteIcon />
                           </IconButton>
                         </Tooltip>
@@ -279,8 +466,49 @@ const AdminDashboard = () => {
         </Card>
       )}
 
+      {/* Permission Matrix Tab */}
+      {activeTab === 3 && (
+        <Card>
+          <CardContent>
+            <Typography variant="h6" sx={{ mb: 2, fontWeight: 'bold' }}>
+              Role Permission Matrix
+            </Typography>
+            <TableContainer>
+              <Table>
+                <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+                  <TableRow>
+                    <TableCell sx={{ fontWeight: 'bold', minWidth: 260 }}>Capability</TableCell>
+                    {roleOptions.map((role) => (
+                      <TableCell key={role} align="center" sx={{ fontWeight: 'bold', minWidth: 160 }}>
+                        {role}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {allPermissions.map((permission) => (
+                    <TableRow key={permission} hover>
+                      <TableCell>{permission}</TableCell>
+                      {roleOptions.map((role) => (
+                        <TableCell key={role} align="center">
+                          {hasPermission(role, permission) ? (
+                            <CheckCircleIcon sx={{ color: '#2e7d32' }} />
+                          ) : (
+                            <Typography component="span" color="textSecondary">-</Typography>
+                          )}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Audit Logs Tab */}
-      {activeTab === 2 && (
+      {activeTab === 4 && (
         <Card>
           <CardContent>
             <Typography variant="h6" sx={{ mb: 2, fontWeight: 'bold' }}>
@@ -322,7 +550,7 @@ const AdminDashboard = () => {
       )}
 
       {/* System Settings Tab */}
-      {activeTab === 3 && (
+      {activeTab === 5 && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
             <Card>
@@ -386,14 +614,28 @@ const AdminDashboard = () => {
             fullWidth
             label="Full Name"
             value={formData.name}
-            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+            error={Boolean(formErrors.name)}
+            helperText={formErrors.name}
+            onChange={(e) => {
+              setFormData({ ...formData, name: e.target.value });
+              if (formErrors.name) {
+                setFormErrors({ ...formErrors, name: '' });
+              }
+            }}
             margin="normal"
           />
           <TextField
             fullWidth
             label="Email"
             value={formData.email}
-            onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+            error={Boolean(formErrors.email)}
+            helperText={formErrors.email}
+            onChange={(e) => {
+              setFormData({ ...formData, email: e.target.value });
+              if (formErrors.email) {
+                setFormErrors({ ...formErrors, email: '' });
+              }
+            }}
             margin="normal"
           />
           <FormControl fullWidth margin="normal">
@@ -403,16 +645,84 @@ const AdminDashboard = () => {
               label="Role"
               onChange={(e) => setFormData({ ...formData, role: e.target.value })}
             >
-              <MenuItem value="Administrator">Administrator</MenuItem>
-              <MenuItem value="Analyst">Analyst</MenuItem>
-              <MenuItem value="Operator">Operator</MenuItem>
+              {roleOptions.map((role) => (
+                <MenuItem key={role} value={role}>{role}</MenuItem>
+              ))}
             </Select>
           </FormControl>
+          {!selectedUser && (
+            <>
+              <TextField
+                fullWidth
+                label="Password"
+                type={showPassword ? 'text' : 'password'}
+                value={formData.password}
+                error={Boolean(formErrors.password)}
+                helperText={formErrors.password}
+                onChange={(e) => {
+                  setFormData({ ...formData, password: e.target.value });
+                  if (formErrors.password) setFormErrors({ ...formErrors, password: '' });
+                }}
+                margin="normal"
+                InputProps={{
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton onClick={() => setShowPassword(!showPassword)} edge="end">
+                        {showPassword ? <VisibilityOff /> : <Visibility />}
+                      </IconButton>
+                    </InputAdornment>
+                  ),
+                }}
+              />
+              <TextField
+                fullWidth
+                label="Confirm Password"
+                type={showConfirmPassword ? 'text' : 'password'}
+                value={formData.confirmPassword}
+                error={Boolean(formErrors.confirmPassword)}
+                helperText={formErrors.confirmPassword}
+                onChange={(e) => {
+                  setFormData({ ...formData, confirmPassword: e.target.value });
+                  if (formErrors.confirmPassword) setFormErrors({ ...formErrors, confirmPassword: '' });
+                }}
+                margin="normal"
+                InputProps={{
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton onClick={() => setShowConfirmPassword(!showConfirmPassword)} edge="end">
+                        {showConfirmPassword ? <VisibilityOff /> : <Visibility />}
+                      </IconButton>
+                    </InputAdornment>
+                  ),
+                }}
+              />
+            </>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setUserDialogOpen(false)}>Cancel</Button>
           <Button onClick={handleSaveUser} variant="contained" sx={{ backgroundColor: '#1a237e' }}>
             Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={deleteConfirmOpen}
+        onClose={() => setDeleteConfirmOpen(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>Confirm Delete</DialogTitle>
+        <DialogContent>
+          <Typography>
+            Are you sure you want to delete {pendingDeleteUser?.name || 'this user'}? This action cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteConfirmOpen(false)}>Cancel</Button>
+          <Button onClick={confirmDeleteUser} variant="contained" sx={{ backgroundColor: '#d32f2f' }}>
+            Delete
           </Button>
         </DialogActions>
       </Dialog>

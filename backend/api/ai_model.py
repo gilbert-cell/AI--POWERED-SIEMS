@@ -1,10 +1,10 @@
 import joblib
 import numpy as np
 import pandas as pd
-import re
+import os
 from pathlib import Path
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -12,53 +12,78 @@ DATA_DIR = BASE_DIR / "data"
 MODEL_PATH = BASE_DIR / "model.pkl"
 IF_MODEL_PATH = BASE_DIR / "isolation_forest.pkl"
 IF_SCALER_PATH = BASE_DIR / "isolation_forest_scaler.pkl"
-# Score normalization bounds saved at train time so live scoring is consistent
 IF_SCORE_BOUNDS_PATH = BASE_DIR / "isolation_forest_bounds.pkl"
 
+# ── DB connection (SQLAlchemy) ────────────────────────────────────────────────
+def _get_engine():
+    """Build SQLAlchemy engine from Django settings / env vars."""
+    from sqlalchemy import create_engine
+    from urllib.parse import quote_plus
+    # Prefer DATABASE_URL (Render), fall back to individual env vars
+    url = os.environ.get('DATABASE_URL')
+    if not url:
+        name = os.environ.get('DB_NAME', 'siem_db')
+        user = os.environ.get('DB_USER', 'grace')
+        pwd  = quote_plus(os.environ.get('DB_PASSWORD', ''))
+        host = os.environ.get('DB_HOST', 'localhost')
+        port = os.environ.get('DB_PORT', '5432')
+        url  = f'postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{name}'
+    # Render uses postgres:// — SQLAlchemy needs postgresql://
+    url = url.replace('postgres://', 'postgresql+psycopg2://', 1)
+    return create_engine(url)
 
-def get_dataset_path(filename: str = "UNSW_NB15_training-set.csv") -> Path:
+
+def _load_db_dataframe(limit: int = None) -> pd.DataFrame:
+    """
+    Load api_log rows from PostgreSQL into a DataFrame.
+    Encodes categorical columns to numeric for ML.
+    """
+    engine = _get_engine()
+    q = 'SELECT duration, packets_sent, bytes_sent, port, anomaly_score, if_score, rf_score, severity, event_type, source FROM api_log'
+    if limit:
+        q += f' ORDER BY id DESC LIMIT {limit}'
+    with engine.connect() as conn:
+        df = pd.read_sql(q, conn)
+
+    # Fill nulls
+    df['port'] = df['port'].fillna(0)
+    df[['duration', 'packets_sent', 'bytes_sent']] = df[['duration', 'packets_sent', 'bytes_sent']].fillna(0)
+
+    # Encode categoricals
+    for col in ('severity', 'event_type', 'source'):
+        df[col] = LabelEncoder().fit_transform(df[col].astype(str))
+
+    return df
+
+
+# ── Isolation Forest features (numeric only) ─────────────────────────────────
+IF_FEATURES = ['duration', 'packets_sent', 'bytes_sent', 'port']
+
+# ── Legacy CSV path (kept for fallback only) ─────────────────────────────────
+def get_dataset_path(filename: str = 'UNSW_NB15_training-set.csv') -> Path:
     return DATA_DIR / filename
 
 
-def train_model(csv_filename: str = "UNSW_NB15_training-set.csv") -> dict:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = get_dataset_path(csv_filename)
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"Dataset not found at {csv_path}. Place UNSW_NB15_training-set.csv under backend/data/."
-        )
+def train_model(csv_filename: str = None) -> dict:
+    """Train Random Forest from PostgreSQL api_log table."""
+    df = _load_db_dataframe()
+    if len(df) < 10:
+        raise ValueError('Not enough data in api_log to train. Load logs first.')
 
-    df = pd.read_csv(csv_path, low_memory=False)
-    if "label" not in df.columns:
-        raise ValueError('Dataset must contain a "label" target column.')
+    # Label: anomaly_score >= 0.45 = threat
+    df['label'] = (df['anomaly_score'] >= 0.45).astype(int)
+    feature_cols = ['duration', 'packets_sent', 'bytes_sent', 'port', 'severity', 'event_type', 'source']
+    X = df[feature_cols]
+    y = df['label']
 
-    X = df.drop(columns=["label"])
-    y = df["label"]
-    X = pd.get_dummies(X)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.2,
-        random_state=42,
-        stratify=y if len(y.unique()) > 1 else None,
-    )
-
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     model = RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=42)
     model.fit(X_train, y_train)
 
-    artifact = {
-        "model": model,
-        "columns": X.columns.tolist(),
-    }
+    artifact = {'model': model, 'columns': feature_cols}
     joblib.dump(artifact, MODEL_PATH)
-
     accuracy = model.score(X_test, y_test)
-    return {
-        "model_path": str(MODEL_PATH),
-        "accuracy": float(accuracy),
-        "feature_count": len(X.columns),
-    }
+    return {'model_path': str(MODEL_PATH), 'accuracy': float(accuracy), 'feature_count': len(feature_cols)}
 
 
 def train_hybrid_models(csv_filename: str = "UNSW_NB15_training-set.csv") -> dict:
@@ -83,23 +108,17 @@ def load_model_artifact() -> dict | None:
     return None
 
 
-def preview_dataset(csv_filename: str = "UNSW_NB15_training-set.csv", rows: int = 20) -> dict:
-    csv_path = get_dataset_path(csv_filename)
-    if not csv_path.exists():
-        raise FileNotFoundError(
-            f"Dataset not found at {csv_path}. Place UNSW_NB15_training-set.csv under backend/data/."
-        )
-
-    df = pd.read_csv(csv_path, low_memory=False)
-    label_counts = df["label"].value_counts().to_dict() if "label" in df.columns else {}
-    sample_rows = df.head(rows).fillna("").replace({pd.NA: ""}).to_dict(orient="records")
-
+def preview_dataset(csv_filename: str = None, rows: int = 20) -> dict:
+    """Preview api_log data from PostgreSQL."""
+    engine = _get_engine()
+    with engine.connect() as conn:
+        df = pd.read_sql(f'SELECT * FROM api_log ORDER BY id DESC LIMIT {rows}', conn)
+    total = pd.read_sql('SELECT COUNT(*) AS c FROM api_log', engine).iloc[0]['c']
     return {
-        "dataset": csv_filename,
-        "row_count": int(len(df)),
-        "columns": df.columns.tolist(),
-        "label_counts": {str(k): int(v) for k, v in label_counts.items()},
-        "sample_rows": sample_rows,
+        'dataset': 'PostgreSQL:api_log',
+        'row_count': int(total),
+        'columns': df.columns.tolist(),
+        'sample_rows': df.fillna('').astype(str).to_dict(orient='records'),
     }
 
 
@@ -273,49 +292,32 @@ def train_siem_model() -> dict:
 
 
 # Features used by Isolation Forest (numeric columns from UNSW-NB15, excluding id/label)
-IF_FEATURES = [
-    'dur', 'spkts', 'dpkts', 'sbytes', 'dbytes', 'rate', 'sttl', 'dttl',
-    'sload', 'dload', 'sloss', 'dloss', 'sinpkt', 'dinpkt', 'sjit', 'djit',
-    'swin', 'dwin', 'tcprtt', 'synack', 'ackdat', 'smean', 'dmean',
-    'ct_srv_src', 'ct_state_ttl', 'ct_dst_ltm', 'ct_src_dport_ltm',
-    'ct_dst_sport_ltm', 'ct_dst_src_ltm', 'ct_src_ltm', 'ct_srv_dst',
-]
 
+def train_isolation_forest(csv_filename: str = None) -> dict:
+    """Train Isolation Forest from PostgreSQL api_log numeric features."""
+    df = _load_db_dataframe()
+    if len(df) < 10:
+        raise ValueError('Not enough data in api_log to train.')
 
-def train_isolation_forest(csv_filename: str = 'UNSW_NB15_training-set.csv') -> dict:
-    """Train Isolation Forest on UNSW-NB15 normal traffic with proper scaling and score normalization."""
-    csv_path = get_dataset_path(csv_filename)
-    if not csv_path.exists():
-        raise FileNotFoundError(f'Dataset not found at {csv_path}.')
+    X = df[IF_FEATURES].fillna(0)
 
-    df = pd.read_csv(csv_path, low_memory=False)
-
-    # Drop id — it is just a row index, not a feature
-    available = [c for c in IF_FEATURES if c in df.columns]
-    normal_df = df[df['label'] == 0][available].fillna(0)
-
-    # Scale features — required for Isolation Forest to work correctly
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(normal_df)
+    X_scaled = scaler.fit_transform(X)
 
     model = IsolationForest(n_estimators=100, contamination=0.05, random_state=42, n_jobs=-1)
     model.fit(X_scaled)
 
-    # Compute score bounds on the FULL dataset so live scores are normalized consistently
-    all_df = df[available].fillna(0)
-    all_scaled = scaler.transform(all_df)
-    raw_scores = model.decision_function(all_scaled)
-    score_min = float(raw_scores.min())
-    score_max = float(raw_scores.max())
+    raw_scores = model.decision_function(X_scaled)
+    score_min, score_max = float(raw_scores.min()), float(raw_scores.max())
 
-    joblib.dump({'model': model, 'columns': available}, IF_MODEL_PATH)
+    joblib.dump({'model': model, 'columns': IF_FEATURES}, IF_MODEL_PATH)
     joblib.dump(scaler, IF_SCALER_PATH)
     joblib.dump({'min': score_min, 'max': score_max}, IF_SCORE_BOUNDS_PATH)
 
     return {
         'model_path': str(IF_MODEL_PATH),
-        'feature_count': len(available),
-        'training_samples': len(normal_df),
+        'feature_count': len(IF_FEATURES),
+        'training_samples': len(X),
         'score_min': round(score_min, 4),
         'score_max': round(score_max, 4),
     }
@@ -327,22 +329,16 @@ def load_if_artifact() -> dict | None:
     return None
 
 
-# SIEM log features → UNSW-NB15 feature mapping
-# Maps (duration, packets_sent, bytes_sent) from live logs to IF feature space
+# SIEM log features → DB-based IF feature mapping
 def _siem_record_to_if_features(record: dict, columns: list) -> pd.DataFrame:
-    """Map SIEM log fields to Isolation Forest feature vector."""
-    row = {c: 0.0 for c in columns}
-    # Direct mappings from SIEM structured fields
-    row['dur']    = float(record.get('duration',     record.get('dur',    0)) or 0)
-    row['spkts']  = float(record.get('packets_sent', record.get('spkts',  0)) or 0)
-    row['sbytes'] = float(record.get('bytes_sent',   record.get('sbytes', 0)) or 0)
-    # Derive dpkts/dbytes as rough estimates if not provided
-    row['dpkts']  = float(record.get('dpkts',  row['spkts']  * 0.8) or 0)
-    row['dbytes'] = float(record.get('dbytes', row['sbytes'] * 0.7) or 0)
-    row['rate']   = float(row['spkts'] / row['dur'] if row['dur'] > 0 else 0)
-    row['sload']  = float(row['sbytes'] * 8 / row['dur'] if row['dur'] > 0 else 0)
-    row['dload']  = float(row['dbytes'] * 8 / row['dur'] if row['dur'] > 0 else 0)
-    return pd.DataFrame([row]).reindex(columns=columns, fill_value=0)
+    """Map SIEM log fields to Isolation Forest feature vector (DB-based features)."""
+    row = {
+        'duration':     float(record.get('duration',     record.get('dur',    0)) or 0),
+        'packets_sent': float(record.get('packets_sent', record.get('spkts',  0)) or 0),
+        'bytes_sent':   float(record.get('bytes_sent',   record.get('sbytes', 0)) or 0),
+        'port':         float(record.get('port', 0) or 0),
+    }
+    return pd.DataFrame([{c: row.get(c, 0.0) for c in columns}])
 
 
 def if_score_record(record: dict) -> float | None:
@@ -405,35 +401,33 @@ def score_siem_log(duration: float, packets_sent: int, bytes_sent: int) -> float
 
 def predict_record(record: dict) -> dict:
     if not isinstance(record, dict):
-        raise ValueError("Input must be a JSON object with feature names and values.")
+        raise ValueError('Input must be a JSON object with feature names and values.')
 
     artifact = load_model_artifact()
     if artifact is None:
-        raise FileNotFoundError("No trained model found. Run ai_train or backend/train_model.py first.")
+        raise FileNotFoundError('No trained model found. Train via /api/ai/train/')
 
-    model = artifact["model"]
-    columns = artifact["columns"]
-    data_frame = pd.DataFrame([record])
-    data_frame = pd.get_dummies(data_frame)
-    data_frame = data_frame.reindex(columns=columns, fill_value=0)
+    model   = artifact['model']
+    columns = artifact['columns']
+    df = pd.DataFrame([{c: record.get(c, 0) for c in columns}])
 
-    prediction = model.predict(data_frame)
-    response = {"threat": int(prediction[0])}
+    prediction = model.predict(df)
+    response   = {'threat': int(prediction[0])}
 
     rf_score = None
-    if hasattr(model, "predict_proba"):
-        proba = model.predict_proba(data_frame)[0].tolist()
-        response["probabilities"] = proba
+    if hasattr(model, 'predict_proba'):
+        proba    = model.predict_proba(df)[0].tolist()
+        response['probabilities'] = proba
         rf_score = float(proba[1]) if len(proba) > 1 else float(proba[0])
     else:
         rf_score = float(prediction[0])
 
-    response["rf_score"] = round(min(max(rf_score, 0.0), 1.0), 3)
+    response['rf_score'] = round(min(max(rf_score, 0.0), 1.0), 3)
 
     if _record_has_if_features(record):
         if_score = if_score_record(record)
         if if_score is not None:
-            response["if_score"] = if_score
-            response["hybrid_score"] = _compute_hybrid_score(response["rf_score"], if_score)
+            response['if_score']     = if_score
+            response['hybrid_score'] = _compute_hybrid_score(response['rf_score'], if_score)
 
     return response

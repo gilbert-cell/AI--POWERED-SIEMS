@@ -1585,6 +1585,107 @@ def confirm_anomaly_threat(request, anomaly_id):
     except Exception as e:
         return JsonResponse({'success': False, 'error': str(e)}, status=400)
 
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def inject_real_anomaly(request):
+    """
+    Inject a real anomaly into the SIEM.
+    Accepts a log payload, runs the full hybrid ML scoring pipeline
+    (Isolation Forest + Random Forest + pattern rules), persists the Log
+    and Anomaly records, and returns the scored result.
+
+    Required body fields:
+        message  (str)  — raw log message
+        level    (str)  — INFO / WARNING / ERROR / CRITICAL
+        source   (str)  — e.g. 'firewall', 'auth-service'
+
+    Optional body fields (improve IF scoring accuracy):
+        duration, packets_sent, bytes_sent, src_ip, dst_ip, port,
+        protocol, service, state, attack_category
+    """
+    from .models import Log, Anomaly
+    try:
+        data = json.loads(request.body)
+        msg    = data.get('message', '')
+        level  = data.get('level', 'ERROR')
+        source = data.get('source', 'ids-system')
+
+        if not msg:
+            return JsonResponse({'error': 'message is required'}, status=400)
+
+        parsed  = parse_message(msg)
+        cat     = data.get('attack_category', parsed.get('attack_category', ''))
+        etype   = normalize_event_type(msg, cat, level)
+        sev     = normalize_severity(msg, level, cat)
+        att_cat = normalize_attack_category(etype, cat)
+        defs    = _EVENT_DEFAULTS.get(etype, {})
+
+        import re as _re, random as _rnd
+        _SRC = _re.compile(r'src=(\d+\.\d+\.\d+\.\d+)')
+        _DST = _re.compile(r'dst=(\d+\.\d+\.\d+\.\d+)')
+        _DPT = _re.compile(r'DPT=(\d+)')
+        src_m = _SRC.search(msg)
+        dst_m = _DST.search(msg)
+        dpt_m = _DPT.search(msg)
+
+        proto        = data.get('protocol') or defs.get('protocol', '')
+        service      = data.get('service')  or defs.get('service', '')
+        state        = data.get('state')    or defs.get('state', '')
+        port         = (data.get('port')
+                        or (int(dpt_m.group(1)) if dpt_m else None)
+                        or _SERVICE_PORT.get((service or '').lower())
+                        or defs.get('port'))
+        src_ip       = data.get('src_ip') or (src_m.group(1) if src_m else None)
+        dst_ip       = data.get('dst_ip') or (dst_m.group(1) if dst_m else None)
+        duration     = data.get('duration')     or (round(_rnd.uniform(*defs['duration']), 6)     if defs else None)
+        packets_sent = data.get('packets_sent') or (_rnd.randint(*defs['packets'])                 if defs else None)
+        bytes_sent   = data.get('bytes_sent')   or (_rnd.randint(*defs['bytes'])                   if defs else None)
+
+        log = Log.objects.create(
+            source=source, message=msg, level=level,
+            event_type=etype, severity=sev, attack_category=att_cat,
+            protocol=proto, service=service, state=state,
+            src_ip=src_ip or None, dst_ip=dst_ip or None, port=port,
+            duration=duration, packets_sent=packets_sent, bytes_sent=bytes_sent,
+        )
+
+        result = score_log_anomaly(msg, level, source, record={
+            'duration': log.duration, 'packets_sent': log.packets_sent, 'bytes_sent': log.bytes_sent,
+        })
+        log.anomaly_score = result['score']
+        log.if_score      = result['if_score']
+        log.rf_score      = result['rf_score']
+        log.save(update_fields=['anomaly_score', 'if_score', 'rf_score'])
+
+        # Always create/update an Anomaly for injected events (minimum score floor = 0.45)
+        score = max(result['score'], 0.45)
+        anomaly, created = Anomaly.objects.update_or_create(
+            log=log,
+            defaults={
+                'anomaly_type': result['types'][0],
+                'score': score,
+                'details': result['reason'],
+                'status': 'confirmed',
+            }
+        )
+
+        return JsonResponse({
+            'status': 'injected',
+            'log_id': log.id,
+            'anomaly_id': anomaly.id,
+            'event_type': log.event_type,
+            'severity': log.severity,
+            'anomaly_type': anomaly.anomaly_type,
+            'anomaly_score': anomaly.score,
+            'if_score': result['if_score'],
+            'rf_score': result['rf_score'],
+            'reason': result['reason'],
+            'created': created,
+        }, status=201)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)
+
 # ── Rules Endpoints ──────────────────────────────────────────────────────────
 
 # Maps AI decision attack types → rule fields
