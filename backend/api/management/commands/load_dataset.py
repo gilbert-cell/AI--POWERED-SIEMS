@@ -1,5 +1,6 @@
 from django.core.management.base import BaseCommand
 from api.ai_model import load_dataset_to_logs
+from api.models import Log
 
 
 class Command(BaseCommand):
@@ -12,9 +13,23 @@ class Command(BaseCommand):
             default=1000,
             help='Maximum number of rows to load from dataset',
         )
+        parser.add_argument(
+            '--skip-if-existing',
+            action='store_true',
+            help='Skip loading when logs already exist in the database',
+        )
 
     def handle(self, *args, **options):
         max_rows = options.get('max_rows', 1000)
+        if options.get('skip_if_existing') and Log.objects.exists():
+            existing_count = Log.objects.count()
+            self.stdout.write(
+                self.style.WARNING(
+                    f'Skipping dataset load because database already has {existing_count} logs.'
+                )
+            )
+            return
+
         self.stdout.write(f'Loading dataset (max {max_rows} rows)...')
 
         try:

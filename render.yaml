@@ -4,7 +4,7 @@ services:
     runtime: python
     rootDir: backend
     buildCommand: ./build.sh
-    startCommand: python manage.py migrate && gunicorn siem_project.wsgi:application --bind 0.0.0.0:$PORT
+    startCommand: python manage.py migrate && python manage.py load_dataset --max-rows 1000 --skip-if-existing && gunicorn siem_project.wsgi:application --bind 0.0.0.0:$PORT
     envVars:
       - key: SECRET_KEY
         generateValue: true
