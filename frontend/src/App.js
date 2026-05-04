@@ -166,6 +166,7 @@ function App() {
               <Route path="/settings" element={<ProtectedRoute role={currentRole} path="/settings"><SettingsPage /></ProtectedRoute>} />
               <Route path="/admin" element={<ProtectedRoute role={currentRole} path="/admin"><AdminDashboard /></ProtectedRoute>} />
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route path="*" element={<Navigate to="/dashboard" replace />} />
             </Routes>
           </Box>
         </Box>
