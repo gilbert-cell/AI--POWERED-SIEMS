@@ -4,6 +4,13 @@ from . import views
 urlpatterns = [
     # Root
     path('', views.api_root, name='api-root'),
+
+    # Auth endpoints
+    path('auth/login/', views.auth_login, name='auth-login'),
+    path('auth/me/', views.auth_me, name='auth-me'),
+    path('auth/users/', views.auth_users, name='auth-users'),
+    path('auth/users/<int:user_id>/', views.auth_user_detail, name='auth-user-detail'),
+    path('auth/reset-password/', views.auth_reset_password, name='auth-reset-password'),
     
     # Dashboard endpoints
     path('dashboard/stats/', views.dashboard_stats, name='dashboard-stats'),

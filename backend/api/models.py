@@ -1,4 +1,5 @@
 from django.db import models
+from django.contrib.auth.models import User
 
 class Log(models.Model):
     SEVERITY_CHOICES = [('LOW','Low'),('MEDIUM','Medium'),('HIGH','High'),('CRITICAL','Critical')]
@@ -106,3 +107,21 @@ class Threshold(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.value}{self.unit})"
+
+
+class UserProfile(models.Model):
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('inactive', 'Inactive'),
+    ]
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
+    role = models.CharField(max_length=64, default='System Administrator')
+    phone = models.CharField(max_length=32, blank=True, default='')
+    department = models.CharField(max_length=120, blank=True, default='Security Operations (SOC)')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='active')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.email or self.user.username} ({self.role})"

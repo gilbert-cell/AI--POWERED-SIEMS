@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Box,
   Container,
@@ -6,6 +6,7 @@ import {
   Card,
   CardContent,
   Grid,
+  Alert,
   Table,
   TableBody,
   TableCell,
@@ -91,21 +92,13 @@ const buildAuditLogs = (users, sessionUser) => {
 };
 
 const AdminDashboard = () => {
-  const storedUsers = getRegisteredUsers();
   const sessionUser = getCurrentUser();
   const [activeTab, setActiveTab] = useState(0);
   const [currentRole, setCurrentRole] = useState(getStoredRole());
-  const [users, setUsers] = useState(() => storedUsers.map((user) => ({
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: user.role || ROLES.SECURITY_ADMINISTRATOR,
-    status: user.status || 'active',
-    lastLogin: formatShortDate(user.lastLoginAt),
-  })));
-  const [systemHealth, setSystemHealth] = useState(() => createSystemHealthSnapshot(storedUsers.length));
+  const [users, setUsers] = useState([]);
+  const [systemHealth, setSystemHealth] = useState(() => createSystemHealthSnapshot(0));
   const [lastRefresh, setLastRefresh] = useState(new Date().toLocaleTimeString());
-  const [auditLogs] = useState(() => buildAuditLogs(storedUsers, sessionUser));
+  const [userLoadError, setUserLoadError] = useState('');
 
   const [userDialogOpen, setUserDialogOpen] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
@@ -115,6 +108,35 @@ const AdminDashboard = () => {
   const [formErrors, setFormErrors] = useState({ name: '', email: '', password: '', confirmPassword: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadUsers = async () => {
+      try {
+        const storedUsers = await getRegisteredUsers();
+        if (!active) return;
+        setUsers(storedUsers.map((user) => ({
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role || ROLES.SECURITY_ADMINISTRATOR,
+          status: user.status || 'active',
+          lastLogin: formatShortDate(user.lastLoginAt),
+        })));
+        setSystemHealth(createSystemHealthSnapshot(storedUsers.length));
+        setUserLoadError('');
+      } catch (error) {
+        if (!active) return;
+        setUserLoadError(error.message || 'Unable to load users.');
+      }
+    };
+
+    loadUsers();
+    return () => { active = false; };
+  }, []);
+
+  const auditLogs = buildAuditLogs(users, sessionUser);
 
   const validateUserForm = (data) => {
     const errors = { name: '', email: '', password: '', confirmPassword: '' };
@@ -162,12 +184,12 @@ const AdminDashboard = () => {
     setUserDialogOpen(true);
   };
 
-  const handleSaveUser = () => {
+  const handleSaveUser = async () => {
     if (!validateUserForm(formData)) return;
 
     if (selectedUser) {
       try {
-        const updatedUser = updateUser(selectedUser.id, {
+        const updatedUser = await updateUser(selectedUser.id, {
           name: formData.name,
           email: formData.email,
           role: formData.role,
@@ -188,7 +210,7 @@ const AdminDashboard = () => {
     } else {
       let createdUser;
       try {
-        createdUser = registerUser({ name: formData.name, email: formData.email, password: formData.password, role: formData.role });
+        createdUser = await registerUser({ name: formData.name, email: formData.email, password: formData.password, role: formData.role });
       } catch (err) {
         setFormErrors((prev) => ({ ...prev, email: err.message }));
         return;
@@ -205,6 +227,7 @@ const AdminDashboard = () => {
         },
       ]);
     }
+    setSystemHealth(createSystemHealthSnapshot(selectedUser ? users.length : users.length + 1));
     setUserDialogOpen(false);
   };
 
@@ -213,10 +236,16 @@ const AdminDashboard = () => {
     setDeleteConfirmOpen(true);
   };
 
-  const confirmDeleteUser = () => {
+  const confirmDeleteUser = async () => {
     if (pendingDeleteUser) {
-      deleteUser(pendingDeleteUser.id);
-      setUsers(users.filter((u) => u.id !== pendingDeleteUser.id));
+      try {
+        await deleteUser(pendingDeleteUser.id);
+        const nextUsers = users.filter((u) => u.id !== pendingDeleteUser.id);
+        setUsers(nextUsers);
+        setSystemHealth(createSystemHealthSnapshot(nextUsers.length));
+      } catch (error) {
+        setUserLoadError(error.message || 'Unable to delete user.');
+      }
       setPendingDeleteUser(null);
     }
     setDeleteConfirmOpen(false);
@@ -250,6 +279,12 @@ const AdminDashboard = () => {
         </Tooltip>
       </Box>
     </Box>
+
+      {userLoadError && (
+        <Alert severity="error" sx={{ mb: 3 }}>
+          {userLoadError}
+        </Alert>
+      )}
 
       <Tabs
         value={activeTab}

@@ -2,8 +2,14 @@ from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.db import models
+from django.db import transaction
+from django.utils import timezone
+from django.utils.crypto import get_random_string
+from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
 from datetime import datetime, timedelta
 import json
+import os
 import re
 
 from .ai_model import (
@@ -238,6 +244,217 @@ def _make_decision(score):
     if score >= 0.75: return 'investigate'
     if score >= 0.45: return 'monitor'
     return None
+
+AUTH_DEFAULT_EMAIL = os.getenv('DEFAULT_ADMIN_EMAIL', 'admin@siem.local')
+AUTH_DEFAULT_PASSWORD = os.getenv('DEFAULT_ADMIN_PASSWORD', 'admin123')
+AUTH_DEFAULT_NAME = os.getenv('DEFAULT_ADMIN_NAME', 'SIEM Admin')
+AUTH_DEFAULT_ROLE = 'System Administrator'
+
+
+def _split_name(name):
+    parts = (name or '').strip().split(None, 1)
+    if not parts:
+        return '', ''
+    if len(parts) == 1:
+        return parts[0], ''
+    return parts[0], parts[1]
+
+
+def _get_profile_model():
+    from .models import UserProfile
+    return UserProfile
+
+
+def _get_or_create_profile(user):
+    UserProfile = _get_profile_model()
+    profile, _ = UserProfile.objects.get_or_create(
+        user=user,
+        defaults={
+            'role': AUTH_DEFAULT_ROLE,
+            'department': 'Security Operations (SOC)',
+            'status': 'active',
+        },
+    )
+    return profile
+
+
+def _serialize_user(user):
+    profile = _get_or_create_profile(user)
+    display_name = user.get_full_name().strip() or user.username or user.email
+    return {
+        'id': user.id,
+        'name': display_name,
+        'email': user.email,
+        'role': profile.role or AUTH_DEFAULT_ROLE,
+        'phone': profile.phone or '',
+        'department': profile.department or 'Security Operations (SOC)',
+        'status': profile.status or 'active',
+        'createdAt': user.date_joined.isoformat() if user.date_joined else None,
+        'lastLoginAt': user.last_login.isoformat() if user.last_login else None,
+    }
+
+
+def ensure_default_auth_user():
+    default_user = User.objects.filter(email__iexact=AUTH_DEFAULT_EMAIL).first()
+    if default_user is None:
+        first_name, last_name = _split_name(AUTH_DEFAULT_NAME)
+        default_user = User.objects.create_user(
+            username=AUTH_DEFAULT_EMAIL,
+            email=AUTH_DEFAULT_EMAIL,
+            password=AUTH_DEFAULT_PASSWORD,
+            first_name=first_name,
+            last_name=last_name,
+            is_staff=True,
+            is_superuser=True,
+        )
+    _get_or_create_profile(default_user)
+    return default_user
+
+
+def _parse_json_request(request):
+    return json.loads(request.body) if request.body else {}
+
+
+def _get_user_by_identity(identity):
+    normalized = (identity or '').strip().lower()
+    if not normalized:
+        return None
+    return (
+        User.objects.filter(email__iexact=normalized).first()
+        or User.objects.filter(username__iexact=normalized).first()
+    )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def auth_login(request):
+    ensure_default_auth_user()
+    data = _parse_json_request(request)
+    email = (data.get('email') or '').strip().lower()
+    password = data.get('password') or ''
+    user = _get_user_by_identity(email)
+    username = user.username if user else email
+    authenticated_user = authenticate(username=username, password=password)
+
+    if not authenticated_user:
+        return JsonResponse({'error': 'Invalid email or password.'}, status=400)
+
+    profile = _get_or_create_profile(authenticated_user)
+    if profile.status != 'active':
+        return JsonResponse({'error': 'This account is inactive.'}, status=403)
+
+    authenticated_user.last_login = timezone.now()
+    authenticated_user.save(update_fields=['last_login'])
+
+    return JsonResponse({
+        'token': f'server-session-{authenticated_user.id}-{get_random_string(24)}',
+        'user': _serialize_user(authenticated_user),
+    })
+
+
+@require_http_methods(["GET"])
+def auth_me(request):
+    ensure_default_auth_user()
+    email = request.GET.get('email', '')
+    user = _get_user_by_identity(email) if email else None
+    if not user:
+        return JsonResponse({'error': 'User not found.'}, status=404)
+    return JsonResponse({'user': _serialize_user(user)})
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+def auth_users(request):
+    ensure_default_auth_user()
+
+    if request.method == 'GET':
+        users = [_serialize_user(user) for user in User.objects.order_by('date_joined')]
+        return JsonResponse({'users': users})
+
+    data = _parse_json_request(request)
+    name = (data.get('name') or '').strip()
+    email = (data.get('email') or '').strip().lower()
+    password = data.get('password') or ''
+    role = (data.get('role') or AUTH_DEFAULT_ROLE).strip()
+
+    if not name or not email or not password:
+        return JsonResponse({'error': 'Name, email, and password are required.'}, status=400)
+    if User.objects.filter(email__iexact=email).exists():
+        return JsonResponse({'error': 'An account with this email already exists.'}, status=400)
+
+    first_name, last_name = _split_name(name)
+    with transaction.atomic():
+        user = User.objects.create_user(
+            username=email,
+            email=email,
+            password=password,
+            first_name=first_name,
+            last_name=last_name,
+        )
+        profile = _get_or_create_profile(user)
+        profile.role = role
+        profile.status = (data.get('status') or 'active').strip().lower() or 'active'
+        profile.phone = (data.get('phone') or '').strip()
+        profile.department = (data.get('department') or 'Security Operations (SOC)').strip()
+        profile.save()
+
+    return JsonResponse({'user': _serialize_user(user)}, status=201)
+
+
+@csrf_exempt
+@require_http_methods(["PUT", "DELETE"])
+def auth_user_detail(request, user_id):
+    ensure_default_auth_user()
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({'error': 'User not found.'}, status=404)
+
+    if request.method == 'DELETE':
+        user.delete()
+        return JsonResponse({'deleted': True})
+
+    data = _parse_json_request(request)
+    next_email = (data.get('email') or user.email).strip().lower()
+    if User.objects.exclude(id=user.id).filter(email__iexact=next_email).exists():
+        return JsonResponse({'error': 'An account with this email already exists.'}, status=400)
+
+    first_name, last_name = _split_name(data.get('name') or user.get_full_name() or user.username)
+    user.email = next_email
+    user.username = next_email
+    user.first_name = first_name
+    user.last_name = last_name
+    if data.get('password'):
+        user.set_password(data['password'])
+    user.save()
+
+    profile = _get_or_create_profile(user)
+    profile.role = (data.get('role') or profile.role or AUTH_DEFAULT_ROLE).strip()
+    profile.status = (data.get('status') or profile.status or 'active').strip().lower()
+    profile.phone = (data.get('phone') or profile.phone or '').strip()
+    profile.department = (data.get('department') or profile.department or 'Security Operations (SOC)').strip()
+    profile.save()
+
+    return JsonResponse({'user': _serialize_user(user)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def auth_reset_password(request):
+    ensure_default_auth_user()
+    data = _parse_json_request(request)
+    email = (data.get('email') or '').strip().lower()
+    password = data.get('password') or ''
+    user = _get_user_by_identity(email)
+
+    if not user:
+        return JsonResponse({'error': 'No account was found for that email.'}, status=404)
+    if not password:
+        return JsonResponse({'error': 'Password is required.'}, status=400)
+
+    user.set_password(password)
+    user.save()
+    return JsonResponse({'reset': True})
 
 _SCORED_EVENTS = [
     {'event': 'Brute Force: [AUTH] failed password attempt invalid user | src=192.168.1.100 dst=10.0.0.1', 'score': 0.98, 'source': 'auth-service', 'level': 'CRITICAL', 'mins': 0},
@@ -2233,4 +2450,3 @@ def analytics_export(request):
             log['timestamp'], log['duplicate'], log['false_positive'],
         ])
     return response
-

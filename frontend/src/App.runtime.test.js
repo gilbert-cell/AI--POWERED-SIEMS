@@ -36,8 +36,8 @@ beforeAll(() => {
   };
 });
 
-test('renders app shell with real routes', async () => {
+test('renders login screen when unauthenticated', async () => {
   render(<App />);
-  expect(screen.getByText(/AI SIEM System/i)).toBeInTheDocument();
-  expect(await screen.findByText('Dashboard')).toBeInTheDocument();
+  expect(screen.getByText(/Welcome Back/i)).toBeInTheDocument();
+  expect(await screen.findByText(/Sign in to your SIEM dashboard/i)).toBeInTheDocument();
 });

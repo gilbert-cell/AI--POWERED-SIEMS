@@ -60,13 +60,13 @@ const AuthPage = ({ mode = 'login' }) => {
     setError(''); setSuccess(''); setLoading(true);
     try {
       if (mode === 'login') {
-        loginUser({ email: form.email, password: form.password });
+        await loginUser({ email: form.email, password: form.password });
         navigate(location.state?.from || '/dashboard', { replace: true });
         return;
       }
       if (form.password.length < 6) throw new Error('Password must be at least 6 characters.');
       if (form.password !== form.confirm) throw new Error('Passwords do not match.');
-      resetPassword({ email: form.email, password: form.password });
+      await resetPassword({ email: form.email, password: form.password });
       setSuccess('Password updated. You can now sign in.');
       setForm((p) => ({ ...p, password: '', confirm: '' }));
     } catch (err) {
