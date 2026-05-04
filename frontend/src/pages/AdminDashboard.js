@@ -47,7 +47,7 @@ import {
   roleDefinitions,
   setStoredRole,
 } from '../utils/rbac';
-import { getCurrentUser, getRegisteredUsers, registerUser } from '../utils/auth';
+import { deleteUser, getCurrentUser, getRegisteredUsers, registerUser, updateUser } from '../utils/auth';
 
 const roleOptions = Object.keys(roleDefinitions);
 
@@ -166,10 +166,29 @@ const AdminDashboard = () => {
     if (!validateUserForm(formData)) return;
 
     if (selectedUser) {
-      setUsers(users.map((u) => (u.id === selectedUser.id ? { ...u, ...formData } : u)));
-    } else {
       try {
-        registerUser({ name: formData.name, email: formData.email, password: formData.password, role: formData.role });
+        const updatedUser = updateUser(selectedUser.id, {
+          name: formData.name,
+          email: formData.email,
+          role: formData.role,
+          password: formData.password || undefined,
+        });
+        setUsers(users.map((u) => (u.id === selectedUser.id ? {
+          id: updatedUser.id,
+          name: updatedUser.name,
+          email: updatedUser.email,
+          role: updatedUser.role,
+          status: updatedUser.status || 'active',
+          lastLogin: formatShortDate(updatedUser.lastLoginAt),
+        } : u)));
+      } catch (err) {
+        setFormErrors((prev) => ({ ...prev, email: err.message }));
+        return;
+      }
+    } else {
+      let createdUser;
+      try {
+        createdUser = registerUser({ name: formData.name, email: formData.email, password: formData.password, role: formData.role });
       } catch (err) {
         setFormErrors((prev) => ({ ...prev, email: err.message }));
         return;
@@ -177,12 +196,12 @@ const AdminDashboard = () => {
       setUsers([
         ...users,
         {
-          id: Math.max(...users.map((u) => u.id), 0) + 1,
-          name: formData.name,
-          email: formData.email,
-          role: formData.role,
-          status: 'active',
-          lastLogin: new Date().toISOString().split('T')[0],
+          id: createdUser.id,
+          name: createdUser.name,
+          email: createdUser.email,
+          role: createdUser.role,
+          status: createdUser.status,
+          lastLogin: formatShortDate(createdUser.lastLoginAt),
         },
       ]);
     }
@@ -196,6 +215,7 @@ const AdminDashboard = () => {
 
   const confirmDeleteUser = () => {
     if (pendingDeleteUser) {
+      deleteUser(pendingDeleteUser.id);
       setUsers(users.filter((u) => u.id !== pendingDeleteUser.id));
       setPendingDeleteUser(null);
     }

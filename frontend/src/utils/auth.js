@@ -119,6 +119,44 @@ export const registerUser = ({ name, email, password, role }) => {
   return user;
 };
 
+export const updateUser = (id, updates) => {
+  const users = getUsers();
+  const userIndex = users.findIndex((user) => user.id === id);
+
+  if (userIndex === -1) {
+    throw new Error('User account was not found.');
+  }
+
+  const normalizedEmail = updates.email?.trim().toLowerCase();
+  if (
+    normalizedEmail &&
+    users.some((user) => user.id !== id && user.email.toLowerCase() === normalizedEmail)
+  ) {
+    throw new Error('An account with this email already exists.');
+  }
+
+  const nextUser = {
+    ...users[userIndex],
+    ...updates,
+    name: updates.name?.trim() || users[userIndex].name,
+    email: normalizedEmail || users[userIndex].email,
+    role: updates.role || users[userIndex].role,
+  };
+
+  if (!updates.password) {
+    nextUser.password = users[userIndex].password;
+  }
+
+  users[userIndex] = nextUser;
+  saveUsers(users);
+  return nextUser;
+};
+
+export const deleteUser = (id) => {
+  const users = getUsers();
+  saveUsers(users.filter((user) => user.id !== id));
+};
+
 export const registerAndLogin = ({ name, email, password, role }) => {
   const user = registerUser({ name, email, password, role });
   return loginUser({ email: user.email, password });
