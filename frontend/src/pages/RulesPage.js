@@ -162,7 +162,7 @@ const RulesTab = () => {
               <Table size="small">
                 <TableHead sx={{ backgroundColor: '#1a237e' }}>
                   <TableRow>
-                    {['Rule Name', 'Type', 'Severity', 'Action', 'Condition', 'Time Window', 'Status', 'Actions'].map((h) => (
+                    {['Rule Name', 'Type', 'Severity', 'Action', 'Status', 'Actions'].map((h) => (
                       <TableCell key={h} sx={{ color: 'white', fontWeight: 'bold', py: 1.5 }}>{h}</TableCell>
                     ))}
                   </TableRow>
@@ -170,7 +170,7 @@ const RulesTab = () => {
                 <TableBody>
                   {rules.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={8} align="center" sx={{ py: 4, color: '#999' }}>
+                      <TableCell colSpan={6} align="center" sx={{ py: 4, color: '#999' }}>
                         No rules configured. Click "Reset Defaults" to load system defaults.
                       </TableCell>
                     </TableRow>
@@ -189,18 +189,6 @@ const RulesTab = () => {
                       <TableCell>
                         <Chip label={rule.action} size="small"
                           sx={{ backgroundColor: '#e3f2fd', color: '#1a237e' }} />
-                      </TableCell>
-                      <TableCell sx={{ maxWidth: 200 }}>
-                        <Typography variant="caption" sx={{ fontFamily: 'monospace',
-                          backgroundColor: '#f5f5f5', px: 1, py: 0.3, borderRadius: 1,
-                          display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {rule.condition || '—'}
-                        </Typography>
-                      </TableCell>
-                      <TableCell>
-                        {rule.time_window > 0
-                          ? <Chip label={`${rule.time_window} min`} size="small" sx={{ backgroundColor: '#e8eaf6', color: '#1a237e' }} />
-                          : <Typography variant="caption" color="textSecondary">—</Typography>}
                       </TableCell>
                       <TableCell>
                         <Tooltip title={rule.enabled ? 'Click to disable' : 'Click to enable'}>
