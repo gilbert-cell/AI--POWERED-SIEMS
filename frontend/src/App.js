@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { HashRouter as Router, Link as RouterLink, Routes, Route, Navigate } from 'react-router-dom';
 import { Box, Button, Card, CardContent, Container, Drawer, Typography } from '@mui/material';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
@@ -39,7 +39,7 @@ const AccessDenied = ({ role }) => (
         <Typography color="textSecondary" sx={{ mb: 3 }}>
           The current role, {role}, does not have permission to view this area.
         </Typography>
-        <Button variant="contained" href="/dashboard" sx={{ backgroundColor: '#1a237e' }}>
+        <Button variant="contained" component={RouterLink} to="/dashboard" sx={{ backgroundColor: '#1a237e' }}>
           Return to Dashboard
         </Button>
       </CardContent>
@@ -82,7 +82,7 @@ function App() {
 
   const handleLogout = () => {
     logoutUser();
-    window.location.href = '/login';
+    window.location.hash = '/login';
   };
 
   if (!authenticated) {
