@@ -9,8 +9,7 @@ import {
   Security as SecurityIcon, Analytics as AnalyticsIcon,
   BugReport as BugIcon,
 } from '@mui/icons-material';
-import { loginUser, registerAndLogin, resetPassword } from '../utils/auth';
-import { DEFAULT_ROLE } from '../utils/rbac';
+import { loginUser, resetPassword } from '../utils/auth';
 
 // ── Left panel feature bullets ────────────────────────────────────────────────
 const FEATURES = [
@@ -45,7 +44,7 @@ const Particle = ({ style }) => (
 const AuthPage = ({ mode = 'login' }) => {
   const navigate  = useNavigate();
   const location  = useLocation();
-  const [form, setForm]         = useState({ name: '', email: '', password: '', confirm: '', role: DEFAULT_ROLE });
+  const [form, setForm]         = useState({ email: '', password: '', confirm: '' });
   const [showPwd, setShowPwd]   = useState(false);
   const [showCfm, setShowCfm]   = useState(false);
   const [error, setError]       = useState('');
@@ -67,11 +66,6 @@ const AuthPage = ({ mode = 'login' }) => {
       }
       if (form.password.length < 6) throw new Error('Password must be at least 6 characters.');
       if (form.password !== form.confirm) throw new Error('Passwords do not match.');
-      if (mode === 'register') {
-        registerAndLogin({ name: form.name, email: form.email, password: form.password, role: form.role });
-        navigate('/dashboard', { replace: true });
-        return;
-      }
       resetPassword({ email: form.email, password: form.password });
       setSuccess('Password updated. You can now sign in.');
       setForm((p) => ({ ...p, password: '', confirm: '' }));
@@ -82,17 +76,11 @@ const AuthPage = ({ mode = 'login' }) => {
     }
   };
 
-  const isLogin    = mode === 'login';
-  const isRegister = mode === 'register';
   const isForgot   = mode === 'forgot';
 
-  const submitLabel = isRegister ? 'Create Account' : isForgot ? 'Update Password' : 'Sign In';
-  const heading     = isRegister ? 'Create Account' : isForgot ? 'Reset Password' : 'Welcome Back';
-  const subheading  = isRegister
-    ? 'Join the AI-Powered SIEM platform'
-    : isForgot
-    ? 'Enter your email and new password'
-    : 'Sign in to your SIEM dashboard';
+  const submitLabel = isForgot ? 'Update Password' : 'Sign In';
+  const heading     = isForgot ? 'Reset Password' : 'Welcome Back';
+  const subheading  = isForgot ? 'Enter your email and new password' : 'Sign in to your SIEM dashboard';
 
   return (
     <Box sx={{ display: 'flex', minHeight: '100vh', fontFamily: 'Inter, sans-serif' }}>
@@ -199,31 +187,6 @@ const AuthPage = ({ mode = 'login' }) => {
             <Typography sx={{ color: '#64748b', fontSize: 14 }}>{subheading}</Typography>
           </Box>
 
-          {/* Tab switcher (login / register only) */}
-          {!isForgot && (
-            <Box sx={{
-              display: 'flex', mb: 4, p: 0.5,
-              backgroundColor: '#e8eaf6', borderRadius: 2,
-            }}>
-              {[{ label: 'Sign In', path: '/login' }, { label: 'Register', path: '/register' }].map(({ label, path }) => {
-                const active = (isLogin && label === 'Sign In') || (isRegister && label === 'Register');
-                return (
-                  <Box key={label} component={RouterLink} to={path} sx={{
-                    flex: 1, textAlign: 'center', py: 1, borderRadius: 1.5,
-                    fontSize: 14, fontWeight: active ? 700 : 500,
-                    color: active ? '#1a237e' : '#64748b',
-                    backgroundColor: active ? 'white' : 'transparent',
-                    boxShadow: active ? '0 1px 4px rgba(0,0,0,0.12)' : 'none',
-                    textDecoration: 'none',
-                    transition: 'all 0.2s',
-                    cursor: 'pointer',
-                  }}>
-                    {label}
-                  </Box>
-                );
-              })}
-            </Box>
-          )}
 
           {/* Alerts */}
           {error   && <Alert severity="error"   sx={{ mb: 2, borderRadius: 2 }}>{error}</Alert>}
@@ -231,11 +194,6 @@ const AuthPage = ({ mode = 'login' }) => {
 
           {/* Form */}
           <Box component="form" onSubmit={handleSubmit} sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
-            {isRegister && (
-              <TextField label="Full Name" value={form.name} onChange={set('name')} required fullWidth
-                sx={inputSx} InputProps={{ sx: { borderRadius: 2 } }} />
-            )}
-
             <TextField label="Email Address" type="email" value={form.email} onChange={set('email')} required fullWidth
               sx={inputSx} InputProps={{ sx: { borderRadius: 2 } }} />
 
@@ -256,7 +214,7 @@ const AuthPage = ({ mode = 'login' }) => {
               }}
             />
 
-            {!isLogin && (
+            {isForgot && (
               <TextField
                 label="Confirm Password"
                 type={showCfm ? 'text' : 'password'}
@@ -276,7 +234,7 @@ const AuthPage = ({ mode = 'login' }) => {
             )}
 
             {/* Forgot password link */}
-            {isLogin && (
+            {!isForgot && (
               <Box sx={{ textAlign: 'right', mt: -1 }}>
                 <Box component={RouterLink} to="/forgot-password"
                   sx={{ fontSize: 13, color: '#1a237e', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } }}>
@@ -298,30 +256,14 @@ const AuthPage = ({ mode = 'login' }) => {
           </Box>
 
           {/* Bottom links */}
-          <Box sx={{ mt: 3, textAlign: 'center' }}>
-            {isForgot ? (
+          {isForgot && (
+            <Box sx={{ mt: 3, textAlign: 'center' }}>
               <Box component={RouterLink} to="/login"
                 sx={{ fontSize: 13, color: '#1a237e', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } }}>
                 ← Back to Sign In
               </Box>
-            ) : isLogin ? (
-              <Typography sx={{ fontSize: 13, color: '#64748b' }}>
-                Don't have an account?{' '}
-                <Box component={RouterLink} to="/register"
-                  sx={{ color: '#1a237e', fontWeight: 700, textDecoration: 'none', '&:hover': { textDecoration: 'underline' } }}>
-                  Create one
-                </Box>
-              </Typography>
-            ) : (
-              <Typography sx={{ fontSize: 13, color: '#64748b' }}>
-                Already have an account?{' '}
-                <Box component={RouterLink} to="/login"
-                  sx={{ color: '#1a237e', fontWeight: 700, textDecoration: 'none', '&:hover': { textDecoration: 'underline' } }}>
-                  Sign in
-                </Box>
-              </Typography>
-            )}
-          </Box>
+            </Box>
+          )}
         </Box>
       </Box>
     </Box>

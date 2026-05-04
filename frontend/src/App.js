@@ -95,7 +95,6 @@ function App() {
       >
         <Routes>
           <Route path="/login" element={<AuthPage mode="login" />} />
-          <Route path="/register" element={<AuthPage mode="register" />} />
           <Route path="/forgot-password" element={<AuthPage mode="forgot" />} />
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
@@ -154,7 +153,6 @@ function App() {
           <Box sx={{ flexGrow: 1, overflow: 'auto' }}>
             <Routes>
               <Route path="/login" element={<Navigate to="/dashboard" replace />} />
-              <Route path="/register" element={<Navigate to="/dashboard" replace />} />
               <Route path="/forgot-password" element={<Navigate to="/dashboard" replace />} />
               <Route path="/dashboard" element={<ProtectedRoute role={currentRole} path="/dashboard"><Dashboard /></ProtectedRoute>} />
               <Route path="/logs" element={<ProtectedRoute role={currentRole} path="/logs"><LogsPage /></ProtectedRoute>} />
