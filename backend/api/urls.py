@@ -11,6 +11,9 @@ urlpatterns = [
     path('auth/users/', views.auth_users, name='auth-users'),
     path('auth/users/<int:user_id>/', views.auth_user_detail, name='auth-user-detail'),
     path('auth/reset-password/', views.auth_reset_password, name='auth-reset-password'),
+
+    # Admin endpoints
+    path('admin/system-settings/', views.admin_system_settings, name='admin-system-settings'),
     
     # Dashboard endpoints
     path('dashboard/stats/', views.dashboard_stats, name='dashboard-stats'),
@@ -23,6 +26,9 @@ urlpatterns = [
     path('logs/', views.logs_list, name='logs-list'),
     path('logs/create/', views.create_log, name='create-log'),
     path('logs/search/', views.logs_search, name='logs-search'),
+    path('logs/live/', views.live_feed, name='logs-live'),
+    path('logs/stream/', views.live_stream, name='logs-stream'),
+    path('logs/export/', views.logs_export, name='logs-export'),
     path('logs/duplicates/', views.logs_duplicates, name='logs-duplicates'),
     path('logs/remove-duplicate/', views.remove_duplicate, name='remove-duplicate'),
     
@@ -47,6 +53,7 @@ urlpatterns = [
     path('ai/decisions/advanced/', views.ai_advanced_decisions, name='ai-advanced-decisions'),
     path('ai/decisions/<int:decision_id>/override/', views.ai_override_decision, name='ai-override-decision'),
     path('ai/accuracy/', views.ai_accuracy, name='ai-accuracy'),
+    path('ai/analysis/', views.ai_analysis, name='ai-analysis'),
     path('ai/train/', views.ai_train, name='ai-train'),
     path('ai/predict/', views.ai_predict, name='ai-predict'),
     path('ai/dataset/preview/', views.ai_dataset_preview, name='ai-dataset-preview'),
@@ -54,9 +61,14 @@ urlpatterns = [
     
     # Anomaly management endpoints
     path('anomalies/inject/', views.inject_real_anomaly, name='inject-real-anomaly'),
+    path('anomalies/simulate/', views.simulate_attack, name='simulate-attack'),
     path('anomalies/<int:anomaly_id>/mark-false-positive/', views.mark_anomaly_false_positive, name='mark-anomaly-false-positive'),
     path('anomalies/<int:anomaly_id>/confirm-threat/', views.confirm_anomaly_threat, name='confirm-anomaly-threat'),
     
+    # Correlation endpoints
+    path('correlation/', views.correlated_events_list, name='correlated-events-list'),
+    path('correlation/run/', views.run_correlation, name='run-correlation'),
+
     # Rules endpoints
     path('rules/', views.rules_list, name='rules-list'),
     path('rules/reset/', views.rules_reset, name='rules-reset'),
@@ -80,4 +92,5 @@ urlpatterns = [
     path('analytics/detection-accuracy/', views.analytics_detection_accuracy, name='analytics-detection-accuracy'),
     path('analytics/top-hosts/', views.analytics_top_hosts, name='analytics-top-hosts'),
     path('analytics/export/', views.analytics_export, name='analytics-export'),
+    path('analytics/evaluation/', views.evaluation_metrics, name='analytics-evaluation'),
 ]

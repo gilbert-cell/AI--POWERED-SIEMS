@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import Dashboard from './Dashboard';
 
 jest.mock('../services/api', () => ({
@@ -37,6 +38,10 @@ beforeAll(() => {
 });
 
 test('renders dashboard heading', async () => {
-  render(<Dashboard />);
+  render(
+    <MemoryRouter>
+      <Dashboard />
+    </MemoryRouter>
+  );
   expect(await screen.findByText('Dashboard')).toBeInTheDocument();
 });

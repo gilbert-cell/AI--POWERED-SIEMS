@@ -1,16 +1,62 @@
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 from django.db import models
 from django.db import transaction
 from django.utils import timezone
-from django.utils.crypto import get_random_string
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from datetime import datetime, timedelta
 import json
+import logging
 import os
 import re
+import time
+import socket
+
+from .log_formatter import format_log_line
+
+from .auth_utils import generate_token, require_auth, require_role, decode_token, get_token_from_request
+from .auth_constants import (
+    AUTH_DEFAULT_ROLE, AUTH_ROLES, AUTH_ROLE_ALIASES,
+    ROLE_SYSTEM_ADMINISTRATOR, ROLE_SECURITY_ANALYST, ROLE_SECURITY_AUDITOR,
+    DEFAULT_PROFILE_DEPARTMENT,
+)
+
+from .config import (
+    ANOMALY_THRESHOLD, FALSE_POSITIVE_SEVERITY,
+    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
+    TIME_RANGE_MAP, TREND_DAYS_DEFAULT,
+    TOP_ALERTS_LIMIT, TOP_HOSTS_LIMIT,
+    CRITICAL_SCORE, HIGH_SCORE, MEDIUM_SCORE,
+    RF_WEIGHT, IF_WEIGHT, PATTERN_WEIGHT,
+    CORRELATED_BOOST, CORRELATED_THRESHOLD,
+)
+
+logger = logging.getLogger(__name__)
+
+ANALYST_STATUS_LABELS = {
+    'false_positive': 'False Positive',
+    'confirmed': 'True Positive',
+    'new': 'Pending Review',
+    'reviewing': 'Under Review',
+    'resolved': 'Resolved',
+}
+
+SYSTEM_SETTINGS_KEY = 'system'
+DEFAULT_SYSTEM_SETTINGS = {
+    'general': {
+        'systemName': 'AI SIEM System',
+        'logRetentionDays': '90',
+        'alertBatchSize': '100',
+        'alertSeverityLevel': 'medium',
+    },
+    'security': {
+        'sessionTimeoutMinutes': '30',
+        'maxLoginAttempts': '5',
+        'requireMfa': 'enabled',
+    },
+}
 
 from .ai_model import (
     load_dataset_to_logs,
@@ -24,6 +70,8 @@ from .ai_model import (
     if_score_record,
 )
 
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+
 def _safe_float(v):
     try: return float(v)
     except (TypeError, ValueError): return None
@@ -31,6 +79,30 @@ def _safe_float(v):
 def _safe_int(v):
     try: return int(float(v))
     except (TypeError, ValueError): return None
+
+_EVENT_TYPE_LABELS = {
+    'LOGIN_FAILED':         'Login Failed',
+    'LOGIN_SUCCESS':        'Login Success',
+    'BRUTE_FORCE':          'Brute Force',
+    'SQL_INJECTION':        'SQL Injection',
+    'XSS_ATTACK':           'XSS Attack',
+    'PORT_SCAN':            'Port Scan',
+    'DDOS_ATTACK':          'DDoS Attack',
+    'DOS_ATTACK':           'DoS Attack',
+    'FIREWALL_BLOCK':       'Firewall Block',
+    'PRIVILEGE_ESCALATION': 'Privilege Escalation',
+    'MALWARE_ACTIVITY':     'Malware Activity',
+    'EXPLOIT_ATTEMPT':      'Exploit Attempt',
+    'BACKDOOR':             'Backdoor',
+    'SHELLCODE':            'Shellcode',
+    'RECONNAISSANCE':       'Reconnaissance',
+    'WORM':                 'Worm',
+    'FUZZER':               'Fuzzer',
+    'GENERIC_ATTACK':       'Generic Attack',
+    'CONFIG_CHANGE':        'Config Change',
+    'FILE_ACCESS':          'File Access',
+    'UNKNOWN':              'Unknown',
+}
 
 # ── Normalized event type map ────────────────────────────────────────────────
 _ATTACK_CAT_TO_EVENT = {
@@ -66,35 +138,44 @@ _EVENT_TO_ATTACK_CAT = {
 }
 
 # Severity upgrade rules: if anomaly_score >= threshold, upgrade severity
+# Follows 5-level scale: INFORMATIONAL → LOW → MEDIUM → HIGH → CRITICAL
 _SEVERITY_UPGRADE = [
-    (0.9,  'CRITICAL'),
-    (0.75, 'HIGH'),
-    (0.45, 'MEDIUM'),
-    (0.0,  'LOW'),
+    (0.9,   'CRITICAL'),
+    (0.75,  'HIGH'),
+    (0.45,  'MEDIUM'),
+    (0.15,  'LOW'),
+    (0.0,   'INFORMATIONAL'),
 ]
 _MSG_TO_EVENT = [
     (re.compile(r'brute force|failed password attempt', re.I),       'BRUTE_FORCE'),
     (re.compile(r'sql injection',                        re.I),       'SQL_INJECTION'),
     (re.compile(r'xss|cross-site scripting',             re.I),       'XSS_ATTACK'),
-    (re.compile(r'privilege escalation|sudo:',           re.I),       'PRIVILEGE_ESCALATION'),
+    (re.compile(r'privilege escalation|sudo:|pkexec',    re.I),       'PRIVILEGE_ESCALATION'),
     (re.compile(r'port scan|UFW BLOCK|DPT=',             re.I),       'PORT_SCAN'),
-    (re.compile(r'SYN flood|ddos|connection reset',      re.I),       'DDOS_ATTACK'),
+    (re.compile(r'SYN flood|ddos|connection reset by authenticating', re.I), 'LOGIN_FAILED'),
+    (re.compile(r'connection reset',                     re.I),       'DDOS_ATTACK'),
     (re.compile(r'malware signature',                    re.I),       'MALWARE_ACTIVITY'),
     (re.compile(r'exploit',                              re.I),       'EXPLOIT_ATTEMPT'),
     (re.compile(r'backdoor',                             re.I),       'BACKDOOR'),
     (re.compile(r'shellcode',                            re.I),       'SHELLCODE'),
     (re.compile(r'worm',                                 re.I),       'WORM'),
     (re.compile(r'reconnaissance|recon',                 re.I),       'RECONNAISSANCE'),
-    (re.compile(r'authentication failure|login failed|invalid user', re.I), 'LOGIN_FAILED'),
-    (re.compile(r'authenticated successfully|login success',         re.I), 'LOGIN_SUCCESS'),
+    (re.compile(r'failed password|authentication failure|login failed|invalid user|pam.*auth.*failure|more authentication failures', re.I), 'LOGIN_FAILED'),
+    (re.compile(r'accepted password|accepted publickey|authenticated successfully|login success|session opened for user', re.I), 'LOGIN_SUCCESS'),
     (re.compile(r'firewall block|blocked port',          re.I),       'FIREWALL_BLOCK'),
     (re.compile(r'config modified',                      re.I),       'CONFIG_CHANGE'),
     (re.compile(r'file accessed',                        re.I),       'FILE_ACCESS'),
+    (re.compile(r'cron',                                 re.I),       'LOGIN_SUCCESS'),
 ]
 _MSG_TO_SEVERITY = [
-    (re.compile(r'brute force|sql injection|shellcode|backdoor|malware|ddos|privilege escalation|exploit', re.I), 'critical'),
-    (re.compile(r'port scan|xss|worm|reconnaissance',    re.I),       'high'),
-    (re.compile(r'login failed|firewall block|config',   re.I),       'medium'),
+    # Critical — confirmed or severe attack requiring immediate response
+    (re.compile(r'privilege escalation|root compromise|ransomware|backdoor|data exfiltration|remote code execution|shellcode', re.I), 'CRITICAL'),
+    # High — likely attack or policy violation
+    (re.compile(r'brute.?force|port scan|malware|sql injection|xss|dos attack|ddos|worm|exploit|generic attack|suspicious process', re.I), 'HIGH'),
+    # Medium — suspicious activity requiring investigation
+    (re.compile(r'login failed|authentication failure|failed password|invalid user|firewall block|unexpected file access|high memory|config', re.I), 'MEDIUM'),
+    # Low — minor security event, monitor only
+    (re.compile(r'logout|configuration change|usb device|normal process|reconnaisance analysis', re.I), 'LOW'),
 ]
 _SERVICE_PORT = {'http': 80, 'https': 443, 'ftp': 21, 'ssh': 22, 'dns': 53, 'smtp': 25}
 
@@ -147,14 +228,70 @@ def normalize_event_type(message, attack_category='', level='INFO'):
 
 
 def normalize_severity(message, level='INFO', attack_category=''):
-    """Return LOW/MEDIUM/HIGH/CRITICAL (uppercase) from message + level."""
+    """
+    Severity scale:
+        🔵 INFORMATIONAL — Normal activity (login success, service start, cron job)
+        🟢 LOW           — Minor event, monitor only (logout, config change, single failed login)
+        🟡 MEDIUM        — Suspicious, needs investigation (multiple failed logins, recon, file access)
+        🟠 HIGH          — Likely attack (port scan, brute force, malware, DoS, SQL injection, XSS)
+        🔴 CRITICAL      — Confirmed/severe attack (privilege escalation, ransomware, backdoor, shellcode)
+    """
     msg = (message or '').lower()
-    if any(k in msg for k in ['login success', 'authenticated successfully', 'file accessed']):
+
+    # INFORMATIONAL — normal operational events, no threat
+    if any(k in msg for k in [
+        'login success', 'authenticated successfully', 'ssh session opened',
+        'system boot', 'cron job', 'service started',
+        'accepted password', 'accepted publickey', 'new session',
+    ]) and not any(k in msg for k in ['failed', 'failure', 'invalid', 'error']):
+        return 'INFORMATIONAL'
+
+    # INFORMATIONAL — pam session open/close only when NOT sudo/privilege related
+    if any(k in msg for k in ['session opened', 'session closed', 'pam_unix']) \
+            and not any(k in msg for k in ['auth', 'failure', 'failed', 'invalid', 'sudo', 'pkexec', 'root']):
+        return 'INFORMATIONAL'
+
+    # LOW — minor events, monitor only
+    if any(k in msg for k in [
+        'logout', 'session closed', 'usb device', 'configuration change',
+        'normal process', 'password changed', 'file opened', 'file accessed',
+        'disconnected from', 'connection closed',
+    ]):
         return 'LOW'
-    for pattern, sev in _MSG_TO_SEVERITY:
-        if pattern.search(message or ''):
-            return sev.upper()
-    return {'INFO': 'LOW', 'WARNING': 'MEDIUM', 'ERROR': 'HIGH', 'CRITICAL': 'CRITICAL'}.get(level.upper(), 'LOW')
+
+    # CRITICAL — only confirmed/severe attacks (keep this list small and specific)
+    if any(k in msg for k in [
+        'privilege escalation', 'root compromise', 'ransomware',
+        'data exfiltration', 'remote code execution', 'shellcode',
+        'backdoor', 'reverse shell', 'rootkit',
+    ]):
+        return 'CRITICAL'
+
+    # HIGH — likely attacks requiring prompt investigation
+    if any(k in msg for k in [
+        'brute force', 'brute-force', 'port scan', 'malware', 'sql injection',
+        'xss', 'cross-site', 'dos attack', 'ddos', 'worm', 'exploit',
+        'generic attack', 'suspicious process', 'failed password',
+        'authentication failure', 'invalid user', 'firewall block',
+        'ufw block',
+    ]):
+        return 'HIGH'
+
+    # MEDIUM — suspicious, needs investigation
+    if any(k in msg for k in [
+        'login failed', 'unexpected file access', 'high memory',
+        'config modified', 'reconnaissance', 'recon', 'fuzzer',
+        'unusual connection', 'multiple failures',
+    ]):
+        return 'MEDIUM'
+
+    # Map Django log levels to severity scale
+    return {
+        'INFO':     'INFORMATIONAL',
+        'WARNING':  'MEDIUM',
+        'ERROR':    'HIGH',
+        'CRITICAL': 'CRITICAL',
+    }.get(level.upper(), 'INFORMATIONAL')
 
 
 def normalize_attack_category(event_type, raw_category=''):
@@ -204,7 +341,7 @@ AI_MODELS = [
         'status': 'active',
         'is_active': True,
         'model_type': 'Random Forest (SIEM)',
-        'last_updated': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+        'last_updated': timezone.now().isoformat(),
         'weights': {'generic_risk': 0.91, 'exploit_risk': 0.95, 'dos_risk': 0.93},
         'performance': {'accuracy': 97.8, 'precision': 96.4, 'recall': 95.1, 'f1_score': 95.7},
         'dataset': 'UNSW_NB15 (175341 records, 9 attack categories)',
@@ -217,7 +354,7 @@ AI_MODELS = [
         'status': 'active',
         'is_active': True,
         'model_type': 'Random Forest (SIEM)',
-        'last_updated': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+        'last_updated': timezone.now().isoformat(),
         'weights': {'fuzzer_risk': 0.82, 'recon_risk': 0.88, 'backdoor_risk': 0.96},
         'performance': {'accuracy': 95.4, 'precision': 93.7, 'recall': 92.3, 'f1_score': 93.0},
         'dataset': 'UNSW_NB15 (175341 records, 9 attack categories)',
@@ -230,7 +367,7 @@ AI_MODELS = [
         'status': 'active',
         'is_active': True,
         'model_type': 'Isolation Forest (Unsupervised)',
-        'last_updated': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+        'last_updated': timezone.now().isoformat(),
         'weights': {'contamination': 0.15, 'n_estimators': 100},
         'performance': {'accuracy': 91.2, 'precision': 89.5, 'recall': 88.3, 'f1_score': 88.9},
         'dataset': 'SIEM Live Logs (unsupervised)',
@@ -240,31 +377,37 @@ AI_MODELS = [
 
 # AI decisions seeded from live ML scoring results (score_log_anomaly pipeline)
 def _make_decision(score):
-    if score >= 0.9: return 'block'
-    if score >= 0.75: return 'investigate'
-    if score >= 0.45: return 'monitor'
+    if score >= CRITICAL_SCORE: return 'block'
+    if score >= HIGH_SCORE: return 'investigate'
+    if score >= ANOMALY_THRESHOLD: return 'monitor'
     return None
 
 AUTH_DEFAULT_EMAIL = os.getenv('DEFAULT_ADMIN_EMAIL', 'admin@siem.local')
-AUTH_DEFAULT_PASSWORD = os.getenv('DEFAULT_ADMIN_PASSWORD', 'admin123')
+AUTH_DEFAULT_PASSWORD = os.getenv('DEFAULT_ADMIN_PASSWORD', 'SIEMAdmin@2024!')  # Default secure password
 AUTH_DEFAULT_NAME = os.getenv('DEFAULT_ADMIN_NAME', 'SIEM Admin')
-AUTH_DEFAULT_ROLE = 'System Administrator'
 
 # Additional seeded users from env vars
 _SEED_USERS = [
     {
         'email':    os.getenv('DEFAULT_SECURITY_ADMINISTRATOR_EMAIL', os.getenv('DEFAULT_SECURITY ADMINISTRATOR_EMAIL', '')),
         'password': os.getenv('DEFAULT_SECURITY_ADMINISTRATOR_PASSWORD', os.getenv('DEFAULT_SECURITY ADMINISTRATOR_PASSWORD', '')),
-        'name':     os.getenv('DEFAULT_SECURITY_ADMINISTRATOR_NAME', os.getenv('DEFAULT_SECURITY ADMINISTRATOR_NAME', 'Security Administrator')),
-        'role':     'Security Administrator',
+        'name':     os.getenv('DEFAULT_SECURITY_ANALYST_NAME', os.getenv('DEFAULT_SECURITY_ADMINISTRATOR_NAME', os.getenv('DEFAULT_SECURITY ADMINISTRATOR_NAME', 'Security Analyst'))),
+        'role':     ROLE_SECURITY_ANALYST,
     },
     {
         'email':    os.getenv('DEFAULT_AUDITOR_EMAIL', ''),
         'password': os.getenv('DEFAULT_AUDITOR_PASSWORD', os.getenv('EFAULT_AUDITOR_PASSWORD', '')),
-        'name':     os.getenv('DEFAULT_AUDITOR_NAME', 'Auditor'),
-        'role':     'Auditor',
+        'name':     os.getenv('DEFAULT_AUDITOR_NAME', 'Security Auditor'),
+        'role':     ROLE_SECURITY_AUDITOR,
     },
 ]
+
+
+def _normalize_role(role):
+    value = (role or '').strip()
+    if value in AUTH_ROLES:
+        return value
+    return AUTH_ROLE_ALIASES.get(value, AUTH_DEFAULT_ROLE)
 
 
 def _split_name(name):
@@ -287,7 +430,7 @@ def _get_or_create_profile(user):
         user=user,
         defaults={
             'role': AUTH_DEFAULT_ROLE,
-            'department': 'Security Operations (SOC)',
+            'department': DEFAULT_PROFILE_DEPARTMENT,
             'status': 'active',
         },
     )
@@ -301,7 +444,7 @@ def _serialize_user(user):
         'id': user.id,
         'name': display_name,
         'email': user.email,
-        'role': profile.role or AUTH_DEFAULT_ROLE,
+        'role': _normalize_role(profile.role or AUTH_DEFAULT_ROLE),
         'phone': profile.phone or '',
         'department': profile.department or 'Security Operations (SOC)',
         'status': profile.status or 'active',
@@ -327,7 +470,7 @@ def _seed_user(email, password, name, role, is_superuser=False):
             is_superuser=is_superuser,
         )
     profile = _get_or_create_profile(user)
-    profile.role = role
+    profile.role = _normalize_role(role)
     profile.status = 'active'
     profile.save(update_fields=['role', 'status'])
     return user
@@ -339,14 +482,92 @@ def ensure_default_auth_user():
         AUTH_DEFAULT_EMAIL, AUTH_DEFAULT_PASSWORD,
         AUTH_DEFAULT_NAME, AUTH_DEFAULT_ROLE, is_superuser=True,
     )
+    # Log default credentials on first creation
+    if default_user and not User.objects.filter(~models.Q(id=default_user.id), is_superuser=True).exists():
+        print('')
+        print('╔════════════════════════════════════════════════════════════╗')
+        print('║         SIEM DEFAULT ADMIN CREDENTIALS (First Run)         ║')
+        print('╚════════════════════════════════════════════════════════════╝')
+        print(f'  Email:    {AUTH_DEFAULT_EMAIL}')
+        print(f'  Password: {AUTH_DEFAULT_PASSWORD}')
+        print('')
+        print('⚠  IMPORTANT: Change this password after first login!')
+        print('   Dashboard → Settings → Security')
+        print('════════════════════════════════════════════════════════════')
+        print('')
     # Seed additional users from env vars
     for u in _SEED_USERS:
         _seed_user(u['email'], u['password'], u['name'], u['role'])
     return default_user
 
 
+def _get_system_settings_record():
+    from .models import SystemSetting
+
+    record, created = SystemSetting.objects.get_or_create(
+        key=SYSTEM_SETTINGS_KEY,
+        defaults={'value': DEFAULT_SYSTEM_SETTINGS},
+    )
+    if created:
+        return record
+
+    merged = _merge_system_settings(record.value)
+    if merged != record.value:
+        record.value = merged
+        record.save(update_fields=['value', 'updated_at'])
+    return record
+
+
 def _parse_json_request(request):
     return json.loads(request.body) if request.body else {}
+
+
+def _merge_system_settings(value):
+    value = value if isinstance(value, dict) else {}
+    return {
+        'general': {
+            **DEFAULT_SYSTEM_SETTINGS['general'],
+            **(value.get('general') if isinstance(value.get('general'), dict) else {}),
+        },
+        'security': {
+            **DEFAULT_SYSTEM_SETTINGS['security'],
+            **(value.get('security') if isinstance(value.get('security'), dict) else {}),
+        },
+    }
+
+
+def _validate_system_settings(settings_payload):
+    settings_payload = _merge_system_settings(settings_payload)
+    general = settings_payload['general']
+    security = settings_payload['security']
+
+    if not str(general.get('systemName', '')).strip():
+        return None, 'System name is required.'
+
+    positive_number_fields = [
+        (general.get('logRetentionDays'), 'Log retention days'),
+        (general.get('alertBatchSize'), 'Alert batch size'),
+        (security.get('sessionTimeoutMinutes'), 'Session timeout'),
+        (security.get('maxLoginAttempts'), 'Max login attempts'),
+    ]
+    for value, label in positive_number_fields:
+        parsed = _safe_int(value)
+        if parsed is None or parsed <= 0:
+            return None, f'{label} must be greater than 0.'
+
+    if general.get('alertSeverityLevel') not in {'informational', 'low', 'medium', 'high', 'critical'}:
+        return None, 'Alert severity level is invalid.'
+    if security.get('requireMfa') not in {'enabled', 'disabled', 'optional'}:
+        return None, 'Require MFA setting is invalid.'
+
+    return settings_payload, None
+
+
+def _serialize_system_settings(record):
+    return {
+        'settings': _merge_system_settings(record.value),
+        'updatedAt': record.updated_at.isoformat() if record.updated_at else None,
+    }
 
 
 def _get_user_by_identity(identity):
@@ -380,12 +601,19 @@ def auth_login(request):
     authenticated_user.last_login = timezone.now()
     authenticated_user.save(update_fields=['last_login'])
 
+    profile = _get_or_create_profile(authenticated_user)
+    token = generate_token(
+        user_id=authenticated_user.id,
+        email=authenticated_user.email,
+        role=_normalize_role(profile.role or AUTH_DEFAULT_ROLE),
+    )
     return JsonResponse({
-        'token': f'server-session-{authenticated_user.id}-{get_random_string(24)}',
+        'token': token,
         'user': _serialize_user(authenticated_user),
     })
 
 
+@require_auth
 @require_http_methods(["GET"])
 def auth_me(request):
     ensure_default_auth_user()
@@ -396,6 +624,7 @@ def auth_me(request):
     return JsonResponse({'user': _serialize_user(user)})
 
 
+@require_auth
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
 def auth_users(request):
@@ -409,7 +638,7 @@ def auth_users(request):
     name = (data.get('name') or '').strip()
     email = (data.get('email') or '').strip().lower()
     password = data.get('password') or ''
-    role = (data.get('role') or AUTH_DEFAULT_ROLE).strip()
+    role = _normalize_role(data.get('role') or AUTH_DEFAULT_ROLE)
 
     if not name or not email or not password:
         return JsonResponse({'error': 'Name, email, and password are required.'}, status=400)
@@ -429,12 +658,13 @@ def auth_users(request):
         profile.role = role
         profile.status = (data.get('status') or 'active').strip().lower() or 'active'
         profile.phone = (data.get('phone') or '').strip()
-        profile.department = (data.get('department') or 'Security Operations (SOC)').strip()
+        profile.department = (data.get('department') or DEFAULT_PROFILE_DEPARTMENT).strip()
         profile.save()
 
     return JsonResponse({'user': _serialize_user(user)}, status=201)
 
 
+@require_auth
 @csrf_exempt
 @require_http_methods(["PUT", "DELETE"])
 def auth_user_detail(request, user_id):
@@ -463,10 +693,10 @@ def auth_user_detail(request, user_id):
     user.save()
 
     profile = _get_or_create_profile(user)
-    profile.role = (data.get('role') or profile.role or AUTH_DEFAULT_ROLE).strip()
+    profile.role = _normalize_role(data.get('role') or profile.role or AUTH_DEFAULT_ROLE)
     profile.status = (data.get('status') or profile.status or 'active').strip().lower()
     profile.phone = (data.get('phone') or profile.phone or '').strip()
-    profile.department = (data.get('department') or profile.department or 'Security Operations (SOC)').strip()
+    profile.department = (data.get('department') or profile.department or DEFAULT_PROFILE_DEPARTMENT).strip()
     profile.save()
 
     return JsonResponse({'user': _serialize_user(user)})
@@ -474,7 +704,7 @@ def auth_user_detail(request, user_id):
 
 @csrf_exempt
 @require_http_methods(["POST"])
-def auth_reset_password(request):
+def auth_reset_password(request):  # intentionally public — user may not have a token yet
     ensure_default_auth_user()
     data = _parse_json_request(request)
     email = (data.get('email') or '').strip().lower()
@@ -489,6 +719,28 @@ def auth_reset_password(request):
     user.set_password(password)
     user.save()
     return JsonResponse({'reset': True})
+
+
+@csrf_exempt
+@require_role(ROLE_SYSTEM_ADMINISTRATOR)
+@require_http_methods(["GET", "POST", "PUT"])
+def admin_system_settings(request):
+    if request.method == 'GET':
+        return JsonResponse(_serialize_system_settings(_get_system_settings_record()))
+
+    try:
+        data = _parse_json_request(request)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON request body.'}, status=400)
+
+    settings_payload, error = _validate_system_settings(data.get('settings', data))
+    if error:
+        return JsonResponse({'error': error}, status=400)
+
+    record = _get_system_settings_record()
+    record.value = settings_payload
+    record.save(update_fields=['value', 'updated_at'])
+    return JsonResponse(_serialize_system_settings(record))
 
 _SCORED_EVENTS = [
     {'event': 'Brute Force: [AUTH] failed password attempt invalid user | src=192.168.1.100 dst=10.0.0.1', 'score': 0.98, 'source': 'auth-service', 'level': 'CRITICAL', 'mins': 0},
@@ -507,9 +759,9 @@ _SCORED_EVENTS = [
 AI_DECISIONS = [
     {
         'id': i + 1,
-        'timestamp': (datetime.now() - timedelta(minutes=e['mins'])).isoformat(),
+        'timestamp': (timezone.now() - timedelta(minutes=e['mins'])).isoformat(),
         'event_description': e['event'],
-        'decision': 'threat' if e['score'] >= 0.45 else 'benign',
+        'decision': 'threat' if e['score'] >= ANOMALY_THRESHOLD else 'benign',
         'confidence': int(e['score'] * 100),
         'model': 'ML Threat Detection (SIEM)',
         'status': 'pending',
@@ -524,11 +776,20 @@ AI_DECISIONS = [
 
 def get_sample_logs():
     sample_logs = []
-    now = datetime.now()
+    now = timezone.now()
     source_order = ['network', 'dos', 'intrusion']
     for i in range(1, 61):
         source = source_order[(i - 1) % len(source_order)]
         template = SOURCE_LOG_TEMPLATES[source][(i - 1) % len(SOURCE_LOG_TEMPLATES[source])]
+        message = template['message']
+        timestamp = now - timedelta(minutes=i * 5)
+        
+        # Format message in ISO 8601 style
+        formatted_message = format_log_line(message, source, timestamp=timestamp)
+        
+        event_type = normalize_event_type(message)
+        defs = _EVENT_DEFAULTS.get(event_type, _EVENT_DEFAULTS.get('GENERIC_ATTACK', {}))
+        import random as _rnd  # nosec B311
         sample_logs.append({
             'id': i,
             'source': source,
@@ -536,18 +797,29 @@ def get_sample_logs():
             'destination_ip': f'10.0.{(i % 4) + 1}.{i * 2 % 255}',
             'event_type': template['event_type'],
             'severity': template['severity'],
-            'message': template['message'],
-            'timestamp': (now - timedelta(minutes=i * 5)).isoformat(),
+            'message': message,
+            'formatted_message': formatted_message,
+            'timestamp': timestamp.isoformat(),
             'raw_data': {
-                'protocol': 'TCP' if source == 'network' else 'UDP' if source == 'dos' else 'UNKNOWN',
-                'port': 80 if source == 'network' else 443,
+                'protocol': defs.get('protocol', 'TCP').upper(),
+                'service':  defs.get('service', ''),
+                'state':    defs.get('state', ''),
+                'port':     defs.get('port', 80 if source == 'network' else 443),
             },
+            'features': {
+                'duration':     round(_rnd.uniform(*defs['duration']), 6) if defs.get('duration') else None,  # nosec B311
+                'packets_sent': _rnd.randint(*defs['packets']) if defs.get('packets') else None,              # nosec B311
+                'bytes_sent':   _rnd.randint(*defs['bytes'])   if defs.get('bytes')   else None,              # nosec B311
+            },
+            'ml_scores': {'anomaly_score': 0.0, 'if_score': 0.0, 'rf_score': 0.0},
             'metadata': {
                 'source_system': source,
                 'host': f'server-{(i % 5) + 1}',
             },
             'duplicate': False,
             'false_positive': False,
+            'analyst_status': 'no_anomaly',
+            'status_label': 'No Anomaly',
         })
     return sample_logs
 
@@ -568,16 +840,18 @@ def load_builtin_demo_logs(max_rows=100):
         'Worms': 'WORM',
     }
     severity_to_level = {
-        'low': 'INFO',
-        'medium': 'WARNING',
-        'high': 'ERROR',
-        'critical': 'CRITICAL',
+        'informational': 'INFO',
+        'low':           'INFO',
+        'medium':        'WARNING',
+        'high':          'ERROR',
+        'critical':      'CRITICAL',
     }
     severity_scores = {
-        'LOW': 0.10,
-        'MEDIUM': 0.55,
-        'HIGH': 0.78,
-        'CRITICAL': 0.93,
+        'INFORMATIONAL': 0.02,
+        'LOW':           0.10,
+        'MEDIUM':        0.55,
+        'HIGH':          0.78,
+        'CRITICAL':      0.93,
     }
 
     samples = get_sample_logs()
@@ -748,9 +1022,9 @@ def score_log_anomaly(log_message, log_level, source='', record=None):
     # ── 4. Correlated hybrid score ──
     # Weights: RF=40%, IF=35%, pattern=25%
     # Boost: if both RF and IF agree (both >= 0.6), multiply by 1.15
-    hybrid = round(0.40 * rf_score + 0.35 * if_score + 0.25 * pattern_score, 3)
-    if rf_score >= 0.6 and if_score >= 0.6:
-        hybrid = round(min(hybrid * 1.15, 1.0), 3)
+    hybrid = round(RF_WEIGHT * rf_score + IF_WEIGHT * if_score + PATTERN_WEIGHT * pattern_score, 3)
+    if rf_score >= CORRELATED_THRESHOLD and if_score >= CORRELATED_THRESHOLD:
+        hybrid = round(min(hybrid * CORRELATED_BOOST, 1.0), 3)
         if 'Correlated Detection' not in reasons:
             reasons.append('Correlated Detection')
 
@@ -773,6 +1047,21 @@ def score_log_anomaly(log_message, log_level, source='', record=None):
     }
 
 
+def _build_features(log):
+    """Return ML features for a log, falling back to event-type profile midpoints when null."""
+    defs = _EVENT_DEFAULTS.get((log.event_type or '').upper(), {})
+    def _mid(stored, key):
+        if stored is not None:
+            return stored
+        r = defs.get(key)
+        return round((r[0] + r[1]) / 2, 6) if r else None
+    return {
+        'duration':     _mid(log.duration,     'duration'),
+        'packets_sent': _mid(log.packets_sent,  'packets'),
+        'bytes_sent':   _mid(log.bytes_sent,    'bytes'),
+    }
+
+
 def build_log_payload(log, anomaly=None):
     parsed = parse_message(log.message)
     # Upgrade severity based on anomaly score
@@ -781,10 +1070,28 @@ def build_log_payload(log, anomaly=None):
         for threshold, upgraded in _SEVERITY_UPGRADE:
             if anomaly.score >= threshold:
                 # Only upgrade, never downgrade
-                order = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+                order = ['INFORMATIONAL', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
                 if order.index(upgraded) > order.index(severity):
                     severity = upgraded
                 break
+    
+    # Format message in ISO 8601 auth.log style
+    formatted_message = format_log_line(
+        log.message, 
+        log.source,
+        timestamp=log.timestamp
+    )
+    
+    analyst_status = anomaly.status if anomaly else 'no_anomaly'
+    is_derived_false_positive = bool(
+        anomaly
+        and anomaly.status != 'false_positive'
+        and (log.severity or '').upper() in ('LOW', 'INFORMATIONAL')
+        and (anomaly.score or 0) >= ANOMALY_THRESHOLD
+    )
+    display_status = 'false_positive' if is_derived_false_positive else analyst_status
+    status_label = ANALYST_STATUS_LABELS.get(display_status, 'No Anomaly')
+
     payload = {
         'id': log.id,
         'source': log.source,
@@ -793,7 +1100,9 @@ def build_log_payload(log, anomaly=None):
         'event_type': log.event_type,
         'severity': severity,
         'attack_category': log.attack_category or normalize_attack_category(log.event_type),
+        'dataset_type': log.dataset_type,
         'message': log.message,
+        'formatted_message': formatted_message,
         'timestamp': log.timestamp.isoformat(),
         'raw_data': {
             'protocol': log.protocol or parsed.get('protocol', ''),
@@ -801,11 +1110,7 @@ def build_log_payload(log, anomaly=None):
             'state':    log.state    or parsed.get('state', ''),
             'port':     log.port,
         },
-        'features': {
-            'duration':     log.duration,
-            'packets_sent': log.packets_sent,
-            'bytes_sent':   log.bytes_sent,
-        },
+        'features': _build_features(log),
         'ml_scores': {
             'anomaly_score': log.anomaly_score,
             'if_score':      log.if_score,
@@ -813,20 +1118,40 @@ def build_log_payload(log, anomaly=None):
         },
         'metadata': {
             'source_system': log.source,
-            'host': 'ubuntu',
+            'host': socket.gethostname(),
             'level': log.level,
         },
+        'geoip': {
+            'network': 'private' if (str(log.src_ip or parsed.get('src', '')).startswith(('10.','172.','192.','127.')) or str(log.src_ip or '').startswith('::1')) else 'public',
+            'country': None,
+            'city': None,
+        },
+        'attacker_score': float(log.anomaly_score or 0.0),
         'duplicate': False,
-        'false_positive': False,
+        'false_positive': display_status == 'false_positive',
+        'analyst_status': analyst_status,
+        'display_status': display_status,
+        'status_label': status_label,
     }
     if anomaly:
-        payload['anomaly_score'] = anomaly.score
-        payload['anomaly_type'] = anomaly.anomaly_type
+        payload['anomaly_score']   = anomaly.score
+        payload['anomaly_type']    = anomaly.anomaly_type
         payload['anomaly_details'] = anomaly.details
+        payload['status']          = anomaly.status
+        payload['anomaly'] = {
+            'id':     anomaly.id,
+            'status': anomaly.status,
+            'display_status': display_status,
+            'status_label': status_label,
+            'score':  anomaly.score,
+            'type':   anomaly.anomaly_type,
+        }
     else:
-        payload['anomaly_score'] = 0.0
-        payload['anomaly_type'] = None
+        payload['anomaly_score']   = 0.0
+        payload['anomaly_type']    = None
         payload['anomaly_details'] = None
+        payload['status']          = None
+        payload['anomaly']         = None
     return payload
 
 
@@ -844,21 +1169,17 @@ def run_anomaly_detection_for_logs(logs, source=None):
         log.rf_score      = result['rf_score']
         log.save(update_fields=['anomaly_score', 'if_score', 'rf_score'])
 
-        if result['score'] >= 0.45:
-            anomaly, _ = Anomaly.objects.update_or_create(
+        if result['score'] >= ANOMALY_THRESHOLD:
+            Anomaly.objects.update_or_create(
                 log=log,
                 defaults={
                     'anomaly_type': result['types'][0],
-                    'score': result['score'],
-                    'details': result['reason'],
+                    'score':        result['score'],
+                    'details':      result['reason'],
                 }
             )
-            anomalies.append(anomaly)
+            anomaly_detected = True
 
-    return anomalies
-
-
-# Root endpoint
 @require_http_methods(["GET"])
 def api_root(request):
     """API root endpoint"""
@@ -875,133 +1196,102 @@ def api_root(request):
         }
     })
 
+
 # Dashboard Endpoints
+@require_auth
 @require_http_methods(["GET"])
 def dashboard_stats(request):
-    """Get live dashboard statistics from the database"""
-    from .models import Log, Anomaly
-    from django.utils import timezone
-    total_alerts = Log.objects.count()
-    # Critical: anomalies on CRITICAL-severity logs (updates live as new logs arrive)
-    critical_alerts = Anomaly.objects.filter(
-        log__severity='CRITICAL'
-    ).exclude(
-        models.Q(status='false_positive') | models.Q(log__severity='LOW')
-    ).count()
-    # False positives: LOW-severity logs flagged by ML + manually marked
-    false_positives = Anomaly.objects.filter(
-        models.Q(status='false_positive') | models.Q(log__severity='LOW')
-    ).distinct().count()
-    detection_rate = round((Anomaly.objects.count() / total_alerts * 100), 1) if total_alerts > 0 else 0
-    return JsonResponse({
-        'total_alerts': total_alerts,
-        'critical_alerts': critical_alerts,
-        'false_positives': false_positives,
-        'detection_rate': detection_rate,
-    })
+    from .services import get_dashboard_stats
+    minutes = request.GET.get('minutes')
+    minutes = int(minutes) if minutes else None
+    return JsonResponse(get_dashboard_stats(minutes=minutes))
 
+@require_auth
 @require_http_methods(["GET"])
 def dashboard_source_stats(request):
-    """Get dashboard counts by source system with real false positive counts."""
-    from .models import Log, Anomaly
-    from django.db.models import Count, Q
+    from .services import get_source_stats
+    minutes = request.GET.get('minutes')
+    minutes = int(minutes) if minutes else None
+    return JsonResponse(get_source_stats(minutes=minutes))
 
-    # Count logs per source
-    source_qs = Log.objects.values('source').annotate(count=Count('id'))
-    source_counts = {row['source']: row['count'] for row in source_qs}
-
-    # False positives per source: LOW-severity flagged + manually marked
-    fp_qs = Anomaly.objects.filter(
-        Q(status='false_positive') | Q(log__severity='LOW')
-    ).distinct().values('log__source').annotate(count=Count('id'))
-    false_positive_counts = {row['log__source']: row['count'] for row in fp_qs}
-
-    return JsonResponse({
-        'source_counts': source_counts,
-        'false_positive_counts': false_positive_counts,
-        'total_logs': sum(source_counts.values()),
-    })
-
+@require_auth
 @require_http_methods(["GET"])
 def dashboard_trends(request):
-    """Get real alert trends per day from the DB."""
-    from .models import Log, Anomaly
-    from django.utils import timezone
-    from django.db.models import Count
-    days = int(request.GET.get('days', 30))
-    now = timezone.now()
-    trends = []
-    for i in range(days):
-        day_start = now - timedelta(days=days - i)
-        day_end   = now - timedelta(days=days - i - 1)
-        alerts   = Log.objects.filter(timestamp__gte=day_start, timestamp__lt=day_end).count()
-        resolved = Anomaly.objects.filter(created_at__gte=day_start, created_at__lt=day_end, status='resolved').count()
-        trends.append({
-            'date':     day_start.strftime('%Y-%m-%d'),
-            'alerts':   alerts,
-            'resolved': resolved,
-        })
-    return JsonResponse({'trends': trends})
+    from .services import get_alert_trends
+    days = min(max(int(request.GET.get('days', 30) or 30), 1), 365)
+    return JsonResponse({'trends': get_alert_trends(days)})
 
+@require_auth
 @require_http_methods(["GET"])
 def dashboard_top_alerts(request):
-    """Get top alert types from real DB anomalies."""
-    from .models import Anomaly
-    from django.db.models import Count
-    limit = int(request.GET.get('limit', 10))
-    rows = (
-        Anomaly.objects
-        .values('anomaly_type')
-        .annotate(count=Count('id'))
-        .order_by('-count')[:limit]
-    )
-    def _sev(atype):
-        atype = (atype or '').lower()
-        if any(k in atype for k in ['brute','sql','shellcode','backdoor','malware','ddos','privilege','exploit','intrusion']):
-            return 'critical'
-        if any(k in atype for k in ['port','xss','worm','recon','web']):
-            return 'high'
-        return 'medium'
-    return JsonResponse({'top_alerts': [
-        {'alert_type': row['anomaly_type'], 'count': row['count'], 'severity': _sev(row['anomaly_type'])}
-        for row in rows
-    ]})
+    from .services import get_top_alerts
+    limit = min(max(int(request.GET.get('limit', 10) or 10), 1), 50)
+    minutes = request.GET.get('minutes')
+    minutes = int(minutes) if minutes else None
+    return JsonResponse({'top_alerts': get_top_alerts(limit, minutes=minutes)})
 
+@require_auth
 @require_http_methods(["GET"])
 def dashboard_health(request):
-    """Get system health status"""
+    """Get system health status from live database and host metrics."""
+    from django.db import connection
+
+    try:
+        connection.ensure_connection()
+        database_status = 'connected'
+    except Exception:
+        database_status = 'unavailable'
+
+    cpu_usage = memory_usage = storage_usage = None
+    try:
+        import psutil
+        cpu_usage = psutil.cpu_percent(interval=0)
+        memory_usage = psutil.virtual_memory().percent
+        storage_usage = psutil.disk_usage('/').percent
+    except Exception:
+        logger.debug('psutil is unavailable; host usage metrics omitted', exc_info=True)
+
+    model_paths = [
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models', 'random_forest.pkl'),
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), 'isolation_forest.pkl'),
+    ]
+    ai_status = 'operational' if any(os.path.exists(path) for path in model_paths) else 'unavailable'
+
     return JsonResponse({
         'api_status': 'healthy',
-        'database': 'connected',
-        'database_status': 'connected',
-        'ai_models': 'operational',
-        'ai_models_status': 'operational',
-        'cpu_usage': 42.5,
-        'memory_usage': 68.3,
-        'storage_usage': 55.1
+        'database': database_status,
+        'database_status': database_status,
+        'ai_models': ai_status,
+        'ai_models_status': ai_status,
+        'cpu_usage': cpu_usage,
+        'memory_usage': memory_usage,
+        'storage_usage': storage_usage
     })
 
 # Logs Endpoints
+@require_auth
 @require_http_methods(["GET"])
 def logs_list(request):
     """Get paginated logs"""
     from .models import Log
-    page = int(request.GET.get('page', 1))
-    page_size = int(request.GET.get('page_size', 10))
+    page      = max(int(request.GET.get('page', 1) or 1), 1)
+    page_size = min(max(int(request.GET.get('page_size', DEFAULT_PAGE_SIZE) or DEFAULT_PAGE_SIZE), 1), MAX_PAGE_SIZE)
     duplicates = request.GET.get('duplicates', 'false').lower() == 'true'
     source_filter = request.GET.get('source')
     severity_filter = request.GET.get('severity', '').lower()
+    status_filter = request.GET.get('status', '').strip().lower()
+    dataset_type_filter = request.GET.get('dataset_type', '').lower()
     query = request.GET.get('q', '').strip().lower()
+    range_key = request.GET.get('range', '').strip()
 
-    # Map severity filter to database log levels
-    severity_map = {
-        'critical': 'CRITICAL',
-        'high': 'ERROR',
-        'medium': 'WARNING',
-        'low': 'INFO',
-    }
+    severity_map = {}  # unused — filter directly on severity field
 
     logs_queryset = Log.objects.all().order_by('-timestamp')
+
+    # Apply time range filter
+    delta = TIME_RANGE_MAP.get(range_key)
+    if delta:
+        logs_queryset = logs_queryset.filter(timestamp__gte=timezone.now() - delta)
     
     # If no logs in database, use sample logs
     if logs_queryset.count() == 0:
@@ -1031,9 +1321,31 @@ def logs_list(request):
         })
     
     if source_filter:
-        logs_queryset = logs_queryset.filter(source=source_filter.lower())
-    if severity_filter and severity_filter in severity_map:
-        logs_queryset = logs_queryset.filter(level=severity_map[severity_filter])
+        logs_queryset = logs_queryset.filter(source__iexact=source_filter)
+    if dataset_type_filter in ('network', 'host'):
+        logs_queryset = logs_queryset.filter(dataset_type=dataset_type_filter)
+    if severity_filter:
+        logs_queryset = logs_queryset.filter(severity__iexact=severity_filter)
+    if status_filter:
+        if status_filter in ('false_positive', 'false-positive', 'fp'):
+            logs_queryset = logs_queryset.filter(
+                models.Q(anomaly__status='false_positive') |
+                models.Q(
+                    anomaly__isnull=False,
+                    severity__in=['LOW', 'INFORMATIONAL'],
+                    anomaly__score__gte=ANOMALY_THRESHOLD,
+                )
+            ).distinct()
+        elif status_filter in ('confirmed', 'true_positive', 'true-positive', 'tp'):
+            logs_queryset = logs_queryset.filter(anomaly__status='confirmed')
+        elif status_filter == 'new':
+            logs_queryset = logs_queryset.filter(anomaly__status='new')
+        elif status_filter == 'reviewing':
+            logs_queryset = logs_queryset.filter(anomaly__status='reviewing')
+        elif status_filter == 'resolved':
+            logs_queryset = logs_queryset.filter(anomaly__status='resolved')
+        elif status_filter == 'no_anomaly':
+            logs_queryset = logs_queryset.filter(anomaly__isnull=True)
     if duplicates:
         # For now, just return all - we can implement duplicate detection later
         pass
@@ -1062,12 +1374,13 @@ def logs_list(request):
         'page_size': page_size,
     })
 
+@require_auth
 @require_http_methods(["GET"])
 def logs_search(request):
     """Search logs by query"""
-    query = request.GET.get('q', '').strip().lower()
-    page = int(request.GET.get('page', 1))
-    page_size = int(request.GET.get('page_size', 10))
+    query     = request.GET.get('q', '').strip().lower()
+    page      = max(int(request.GET.get('page', 1) or 1), 1)
+    page_size = min(max(int(request.GET.get('page_size', DEFAULT_PAGE_SIZE) or DEFAULT_PAGE_SIZE), 1), MAX_PAGE_SIZE)
     source_filter = request.GET.get('source')
     severity_filter = request.GET.get('severity', '').lower()
 
@@ -1094,6 +1407,137 @@ def logs_search(request):
         'page_size': page_size,
     })
 
+
+@require_auth
+@require_http_methods(["GET"])
+def live_feed(request):
+    """Return the most recent logs for live dashboard feed."""
+    from .models import Log
+    try:
+        limit = int(request.GET.get('limit', 25))
+    except Exception:
+        limit = 25
+    limit = max(1, min(limit, 200))
+
+    source_filter = request.GET.get('source', '').strip()
+    severity_filter = request.GET.get('severity', '').lower()
+    severity_map = {'informational': 'INFO', 'critical': 'CRITICAL', 'high': 'ERROR', 'medium': 'WARNING', 'low': 'INFO'}
+
+    logs_qs = Log.objects.all().order_by('-timestamp')
+    if source_filter:
+        logs_qs = logs_qs.filter(source__iexact=source_filter)
+    if severity_filter in severity_map:
+        logs_qs = logs_qs.filter(level=severity_map[severity_filter])
+
+    results = []
+    for log in logs_qs[:limit]:
+        anomaly = getattr(log, 'anomaly', None)
+        results.append(build_log_payload(log, anomaly))
+
+    return JsonResponse({'results': results, 'count': len(results)})
+
+
+@require_http_methods(["GET"])
+def live_stream(request):
+    """Server-Sent Events stream of recent logs.
+
+    Supports token via `?token=...` or standard Authorization header (Bearer).
+    """
+    from .models import Log
+
+    # Validate token (allow token via query param for EventSource fallback)
+    token = request.GET.get('token') or get_token_from_request(request)
+    if not token:
+        return JsonResponse({'error': 'Authentication required for stream.'}, status=401)
+    try:
+        claims = decode_token(token)
+    except ValueError as exc:
+        return JsonResponse({'error': str(exc)}, status=401)
+
+    try:
+        limit = int(request.GET.get('limit', 50))
+    except Exception:
+        limit = 50
+    limit = max(1, min(limit, 500))
+
+    def event_stream():
+        # Initial batch (oldest first)
+        qs = Log.objects.all().order_by('-timestamp')[:limit]
+        initial = list(reversed(qs))
+        last_ts = None
+        for log in initial:
+            payload = build_log_payload(log, getattr(log, 'anomaly', None))
+            yield f"data: {json.dumps(payload)}\n\n"
+            last_ts = payload['timestamp']
+
+        # Streaming loop — poll DB for new logs
+        while True:
+            try:
+                if last_ts:
+                    new_logs = Log.objects.filter(timestamp__gt=last_ts).order_by('timestamp')
+                else:
+                    new_logs = Log.objects.all().order_by('timestamp')[:1]
+
+                if new_logs.exists():
+                    for log in new_logs:
+                        payload = build_log_payload(log, getattr(log, 'anomaly', None))
+                        yield f"data: {json.dumps(payload)}\n\n"
+                        last_ts = payload['timestamp']
+                time.sleep(1)
+            except GeneratorExit:
+                break
+            except Exception:
+                # Don't kill stream on transient DB errors
+                time.sleep(1)
+                continue
+
+    response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
+    response['Cache-Control'] = 'no-cache'
+    return response
+
+
+@require_auth
+@require_http_methods(["GET"])
+def logs_export(request):
+    """Export all logs as CSV (no pagination)"""
+    import csv
+    from django.http import StreamingHttpResponse
+    from .models import Log
+
+    source_filter   = request.GET.get('source', '').strip()
+    severity_filter = request.GET.get('severity', '').lower()
+    range_key       = request.GET.get('range', '').strip()
+
+    severity_map = {'informational': 'INFO', 'critical': 'CRITICAL', 'high': 'ERROR', 'medium': 'WARNING', 'low': 'INFO'}
+
+    qs = Log.objects.all().order_by('id')
+    delta = TIME_RANGE_MAP.get(range_key)
+    if delta:
+        qs = qs.filter(timestamp__gte=timezone.now() - delta)
+    if source_filter:
+        qs = qs.filter(source__icontains=source_filter)
+    if severity_filter in severity_map:
+        qs = qs.filter(level=severity_map[severity_filter])
+
+    def rows():
+        yield 'ID,Timestamp,Source,Event Type,Severity,Source IP,Destination IP,Message,Anomaly Score\n'
+        for log in qs.iterator():
+            anomaly = getattr(log, 'anomaly', None)
+            score   = getattr(anomaly, 'score', '') if anomaly else ''
+            msg     = (log.message or '').replace('"', '""')
+            yield (
+                f'{log.id},{log.timestamp},{log.source or ""},'
+                f'{log.event_type or ""},{log.level or ""},'
+                f'{log.src_ip or ""},{log.dst_ip or ""},'
+                f'"{msg}",{score}\n'
+            )
+
+    response = StreamingHttpResponse(rows(), content_type='text/csv')
+    response['Content-Disposition'] = 'attachment; filename="siem-logs-all.csv"'
+    return response
+
+
+@require_auth
 @require_http_methods(["GET"])
 def logs_duplicates(request):
     """Get duplicate logs"""
@@ -1104,6 +1548,7 @@ def logs_duplicates(request):
         ]
     })
 
+@require_auth
 @require_http_methods(["POST"])
 def remove_duplicate(request):
     """Remove duplicate logs"""
@@ -1111,8 +1556,9 @@ def remove_duplicate(request):
         data = json.loads(request.body)
         log_ids = data.get('log_ids', [])
         return JsonResponse({'status': 'success', 'removed': len(log_ids)})
-    except:
-        return JsonResponse({'status': 'error'}, status=400)
+    except (json.JSONDecodeError, KeyError) as exc:
+        logger.warning('remove_duplicate bad request: %s', exc)
+        return JsonResponse({'status': 'error', 'message': 'Invalid request body.'}, status=400)
 
 @require_http_methods(["POST"])
 @csrf_exempt
@@ -1155,10 +1601,10 @@ def create_log(request):
         packets_sent = data.get('packets_sent') or _safe_int(parsed.get('packets_sent'))
         bytes_sent   = data.get('bytes_sent') or _safe_int(parsed.get('bytes_sent'))
         if duration is None and defs:
-            import random as _rnd
-            duration     = round(_rnd.uniform(*defs['duration']), 6)
-            packets_sent = _rnd.randint(*defs['packets'])
-            bytes_sent   = _rnd.randint(*defs['bytes'])
+            import random as _rnd  # nosec B311 — synthetic network feature values, not security use
+            duration     = round(_rnd.uniform(*defs['duration']), 6)  # nosec B311
+            packets_sent = _rnd.randint(*defs['packets'])              # nosec B311
+            bytes_sent   = _rnd.randint(*defs['bytes'])                # nosec B311
 
         log = Log.objects.create(
             source       = source,
@@ -1167,6 +1613,7 @@ def create_log(request):
             event_type   = etype,
             severity     = sev,
             attack_category = att_cat,
+            dataset_type = data.get('dataset_type', 'network'),
             protocol     = proto,
             service      = service,
             state        = state,
@@ -1187,13 +1634,13 @@ def create_log(request):
         log.save(update_fields=['anomaly_score', 'if_score', 'rf_score'])
 
         anomaly_detected = False
-        if result['score'] >= 0.45:
+        if result['score'] >= ANOMALY_THRESHOLD:
             Anomaly.objects.update_or_create(
                 log=log,
                 defaults={
                     'anomaly_type': result['types'][0],
-                    'score': result['score'],
-                    'details': result['reason'],
+                    'score':        result['score'],
+                    'details':      result['reason'],
                 }
             )
             anomaly_detected = True
@@ -1210,6 +1657,7 @@ def create_log(request):
         return JsonResponse({'status': 'error', 'message': str(e)}, status=400)
 
 # Behavior Analysis Endpoints
+@require_auth
 @require_http_methods(["GET"])
 def behavior_analysis(request):
     """Get behavior analysis data filtered by time_range"""
@@ -1238,11 +1686,12 @@ def behavior_analysis(request):
     # Build pattern data bucketed by hour within the window
     now = timezone.now()
     pattern_data = []
+    baseline = round(total / 8, 1) if total else 0
     for i in range(8):
         bucket_start = now - timedelta(hours=8 - i)
         bucket_end = now - timedelta(hours=7 - i)
         count = sum(1 for a in anomaly_qs if bucket_start <= a.created_at < bucket_end)
-        pattern_data.append({'time': bucket_start.strftime('%H:00'), 'baseline': 2, 'actual': count})
+        pattern_data.append({'time': bucket_start.strftime('%H:00'), 'baseline': baseline, 'actual': count})
 
     return JsonResponse({
         'total_anomalies': total,
@@ -1253,6 +1702,7 @@ def behavior_analysis(request):
         'anomaly_types': [{'type': k, 'count': v} for k, v in anomaly_type_counts.items()],
     })
 
+@require_auth
 @require_http_methods(["GET"])
 def behavior_anomalies(request):
     """Get detected anomalies filtered by time_range"""
@@ -1272,9 +1722,9 @@ def behavior_anomalies(request):
         anomalies = anomalies.filter(log__source=source_filter)
 
     def _risk(score):
-        if score >= 0.9: return 'critical'
-        if score >= 0.75: return 'high'
-        if score >= 0.5: return 'medium'
+        if score >= CRITICAL_SCORE: return 'critical'
+        if score >= HIGH_SCORE: return 'high'
+        if score >= MEDIUM_SCORE: return 'medium'
         return 'low'
 
     if anomalies.exists():
@@ -1291,60 +1741,74 @@ def behavior_anomalies(request):
             for a in anomalies[:50]
         ]
     else:
-        now = timezone.now()
-        result = [
-            {'id': 1, 'entity_name': 'network', 'anomaly_type': 'Network Intrusion', 'risk_level': 'critical', 'confidence': 92, 'details': 'Unusual packet patterns on TCP port 22', 'timestamp': (now - timedelta(minutes=30)).isoformat()},
-            {'id': 2, 'entity_name': 'auth-service', 'anomaly_type': 'Suspicious Login', 'risk_level': 'high', 'confidence': 87, 'details': 'Failed login attempts from unusual IP', 'timestamp': (now - timedelta(minutes=45)).isoformat()},
-            {'id': 3, 'entity_name': 'firewall', 'anomaly_type': 'DoS Attack', 'risk_level': 'critical', 'confidence': 95, 'details': 'High volume of requests from single source', 'timestamp': (now - timedelta(minutes=15)).isoformat()},
-            {'id': 4, 'entity_name': 'web-server', 'anomaly_type': 'Web Application Attack', 'risk_level': 'high', 'confidence': 89, 'details': 'SQL injection syntax in request parameters', 'timestamp': (now - timedelta(minutes=60)).isoformat()},
-            {'id': 5, 'entity_name': 'database', 'anomaly_type': 'Privilege Escalation', 'risk_level': 'critical', 'confidence': 91, 'details': 'Unauthorized sudo command execution', 'timestamp': (now - timedelta(minutes=20)).isoformat()},
-        ]
-        if source_filter:
-            result = [a for a in result if a['entity_name'].lower() == source_filter.lower()]
+        result = []
 
     return JsonResponse(result, safe=False)
 
 
+@require_auth
 @require_http_methods(["GET"])
 def behavior_user_analysis(request, user_id):
-    """Get behavior analysis for a specific user"""
+    """User Behavior Analysis — real DB data (Objective 2)."""
+    from .models import Log, Anomaly
     time_range = request.GET.get('time_range', '24h')
-    
-    # Mock user behavior data
-    user_data = {
+    range_map = {'30min': timedelta(minutes=30), '1h': timedelta(hours=1),
+                 '24h': timedelta(hours=24), '7d': timedelta(days=7), '30d': timedelta(days=30)}
+    cutoff = timezone.now() - range_map.get(time_range, timedelta(hours=24))
+
+    # User-correlated logs: auth-service logs where source matches user_id heuristic
+    user_logs = Log.objects.filter(
+        source='auth-service', timestamp__gte=cutoff
+    ).order_by('-timestamp')[:200]
+
+    total_events = user_logs.count()
+    login_failures = user_logs.filter(event_type='LOGIN_FAILED').count()
+    login_success  = user_logs.filter(event_type='LOGIN_SUCCESS').count()
+    escalations    = user_logs.filter(event_type='PRIVILEGE_ESCALATION').count()
+
+    # Behavior score: higher failures/escalations → higher risk score
+    raw_score = min(1.0, (login_failures * 0.15 + escalations * 0.4) / max(total_events, 1))
+    risk_level = 'critical' if raw_score >= 0.9 else 'high' if raw_score >= 0.7 else 'medium' if raw_score >= 0.4 else 'low'
+
+    # Hourly activity pattern from real logs
+    buckets = {h: 0 for h in range(24)}
+    for log in user_logs:
+        buckets[log.timestamp.hour] += 1
+    total_per_hour = max(max(buckets.values()), 1)
+    activity_patterns = [
+        {'hour': h, 'activity_level': round(c / total_per_hour, 2), 'normal_range': [0.2, 0.8]}
+        for h, c in buckets.items() if c > 0
+    ]
+
+    # Real anomalies linked to auth logs
+    anomaly_qs = Anomaly.objects.filter(log__in=user_logs).order_by('-score')[:10]
+    anomalies = [
+        {'id': a.id, 'type': a.anomaly_type, 'description': a.details,
+         'severity': 'critical' if a.score >= 0.9 else 'high' if a.score >= 0.7 else 'medium',
+         'timestamp': a.log.timestamp.isoformat(), 'score': round(a.score, 2)}
+        for a in anomaly_qs
+    ]
+
+    last_log = user_logs.first()
+    return JsonResponse({
         'user_id': user_id,
-        'user_name': f'User {user_id}',
-        'behavior_score': 0.75,
-        'risk_level': 'medium',
-        'last_activity': '2024-01-15T16:30:00Z',
-        'activity_patterns': [
-            {'hour': 9, 'activity_level': 0.8, 'normal_range': [0.6, 0.9]},
-            {'hour': 10, 'activity_level': 0.9, 'normal_range': [0.7, 0.95]},
-            {'hour': 11, 'activity_level': 0.7, 'normal_range': [0.6, 0.9]},
-            {'hour': 12, 'activity_level': 0.3, 'normal_range': [0.2, 0.5]},
-            {'hour': 13, 'activity_level': 0.4, 'normal_range': [0.3, 0.6]},
-            {'hour': 14, 'activity_level': 0.8, 'normal_range': [0.6, 0.9]},
-            {'hour': 15, 'activity_level': 0.9, 'normal_range': [0.7, 0.95]},
-            {'hour': 16, 'activity_level': 0.6, 'normal_range': [0.5, 0.8]},
-        ],
-        'anomalies': [
-            {
-                'id': 1,
-                'type': 'unusual_login_time',
-                'description': 'Login outside normal hours',
-                'severity': 'low',
-                'timestamp': '2024-01-15T02:15:00Z',
-            }
-        ],
-        'recommendations': [
-            'Consider implementing multi-factor authentication',
-            'Monitor login attempts outside business hours',
-        ]
-    }
-    
-    return JsonResponse(user_data)
+        'behavior_score': round(raw_score, 2),
+        'risk_level': risk_level,
+        'total_events': total_events,
+        'login_failures': login_failures,
+        'login_success': login_success,
+        'privilege_escalations': escalations,
+        'last_activity': last_log.timestamp.isoformat() if last_log else None,
+        'activity_patterns': activity_patterns,
+        'anomalies': anomalies,
+        'recommendations': (
+            ['Enforce MFA immediately', 'Block source IPs with repeated failures'] if login_failures > 5
+            else ['Monitor login attempts outside business hours']
+        ),
+    })
 
 
+@require_auth
 @require_http_methods(["GET"])
 def behavior_host_analysis(request, host_id):
     """Get behavior analysis for a specific host"""
@@ -1392,6 +1856,7 @@ def behavior_host_analysis(request, host_id):
     return JsonResponse(host_data)
 
 
+@require_auth
 @require_http_methods(["GET"])
 def behavior_user(request, user_id):
     """Get user behavior profile"""
@@ -1401,12 +1866,13 @@ def behavior_user(request, user_id):
         'anomalies_detected': 3,
         'status': 'normal',
         'recent_events': [
-            {'timestamp': datetime.now().isoformat(), 'event': 'Failed SSH login attempt', 'risk': 'medium'},
-            {'timestamp': (datetime.now() - timedelta(hours=2)).isoformat(), 'event': 'Unexpected privilege escalation', 'risk': 'high'},
+            {'timestamp': timezone.now().isoformat(), 'event': 'Failed SSH login attempt', 'risk': 'medium'},
+            {'timestamp': (timezone.now() - timedelta(hours=2)).isoformat(), 'event': 'Unexpected privilege escalation', 'risk': 'high'},
         ]
     })
 
 
+@require_auth
 @require_http_methods(["GET"])
 def behavior_host(request, host_id):
     """Get host behavior profile"""
@@ -1416,8 +1882,8 @@ def behavior_host(request, host_id):
         'anomalies_detected': 4,
         'status': 'warning',
         'recent_events': [
-            {'timestamp': datetime.now().isoformat(), 'event': 'High outbound traffic volume', 'risk': 'high'},
-            {'timestamp': (datetime.now() - timedelta(hours=3)).isoformat(), 'event': 'New service process started', 'risk': 'medium'},
+            {'timestamp': timezone.now().isoformat(), 'event': 'High outbound traffic volume', 'risk': 'high'},
+            {'timestamp': (timezone.now() - timedelta(hours=3)).isoformat(), 'event': 'New service process started', 'risk': 'medium'},
         ]
     })
 
@@ -1429,11 +1895,13 @@ def detection_anomalies(request):
 
 
 # AI endpoints
+@require_auth
 @require_http_methods(["GET"])
 def ai_models_list(request):
     return JsonResponse({'results': AI_MODELS, 'count': len(AI_MODELS)})
 
 
+@require_auth
 @require_http_methods(["GET"])
 def ai_model_detail(request, model_id):
     model = next((m for m in AI_MODELS if m['id'] == model_id), None)
@@ -1456,13 +1924,14 @@ def ai_model_weights(request, model_id):
         return JsonResponse({'error': str(e)}, status=400)
 
 
+@require_auth
 @require_http_methods(["GET"])
 def ai_decisions(request):
     """Get AI-based threat decisions from real ML model predictions"""
     from .models import Anomaly
 
     status_filter = request.GET.get('status')
-    limit = int(request.GET.get('limit', 20))
+    limit = min(max(int(request.GET.get('limit', 20) or 20), 1), 200)
     use_real_data = request.GET.get('real_data', 'true').lower() == 'true'
 
     if use_real_data:
@@ -1492,8 +1961,8 @@ def ai_decisions(request):
                 if status_filter:
                     decisions = [d for d in decisions if d['status'] == status_filter]
                 return JsonResponse({'results': decisions, 'count': len(decisions), 'data_source': 'real_ml_predictions'})
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning('ai_decisions DB query failed, falling back to sample data: %s', exc)
 
     decisions = AI_DECISIONS
     if status_filter:
@@ -1501,6 +1970,7 @@ def ai_decisions(request):
     return JsonResponse({'results': decisions, 'count': len(decisions), 'data_source': 'sample_data'})
 
 
+@require_auth
 @require_http_methods(["GET"])
 def ai_advanced_decisions(request):
     """Live advanced AI decisions: attack type, action, remediation from DB anomalies."""
@@ -1550,26 +2020,6 @@ def ai_advanced_decisions(request):
             'source': a.log.source,
         })
 
-    # Fallback sample data if DB empty
-    if not rows:
-        from datetime import datetime, timedelta
-        now = datetime.now()
-        samples = [
-            ('Brute Force', 'BLOCK', 'Block source IP, enforce MFA, lock account after 5 failures', 0.98, 'auth-service', 0),
-            ('Web Application Attack', 'BLOCK', 'Apply WAF rule, patch vulnerable endpoint, sanitize inputs', 0.96, 'web-server', 2),
-            ('Network Intrusion', 'BLOCK', 'Isolate affected host, update firewall rules, run IDS scan', 0.94, 'network-monitor', 4),
-            ('Privilege Escalation', 'BLOCK', 'Kill process, revoke elevated privileges, audit sudo logs', 0.92, 'application', 6),
-            ('DDoS / Flood', 'BLOCK', 'Rate-limit source, enable DDoS protection, notify ISP', 0.94, 'firewall', 8),
-            ('Suspicious Login', 'INVESTIGATE', 'Force password reset, alert user, review access logs', 0.98, 'auth-service', 10),
-            ('ML Threat Detection', 'QUARANTINE', 'Quarantine traffic, run deep packet inspection, update model', 0.98, 'ids-system', 12),
-        ]
-        for i, (atype, action, rem, score, src, mins) in enumerate(samples):
-            rows.append({'id': i+1, 'timestamp': (now - timedelta(minutes=mins)).isoformat(),
-                         'attack_type': atype, 'action': action, 'remediation': rem,
-                         'score': score, 'source': src})
-            attack_counts[atype] = attack_counts.get(atype, 0) + 1
-        total_count = len(rows)
-
     return JsonResponse({
         'results': rows,
         'attack_counts': dict(sorted(attack_counts.items(), key=lambda x: x[1], reverse=True)),
@@ -1593,6 +2043,7 @@ def ai_override_decision(request, decision_id):
         return JsonResponse({'error': str(e)}, status=400)
 
 
+@require_auth
 @require_http_methods(["GET"])
 def ai_accuracy(request):
     """Live confusion matrix and accuracy metrics from DB anomalies."""
@@ -1745,6 +2196,7 @@ def ai_load_dataset(request):
         return JsonResponse({'error': str(e)}, status=400)
 
 
+@require_auth
 @require_http_methods(["GET"])
 def run_anomaly_detection(request):
     """Run anomaly scoring against recent log data"""
@@ -1758,7 +2210,7 @@ def run_anomaly_detection(request):
 
     if time_range.endswith('h'):
         hours = int(time_range[:-1])
-        cutoff = datetime.now() - timedelta(hours=hours)
+        cutoff = timezone.now() - timedelta(hours=hours)
         logs = logs.filter(timestamp__gte=cutoff)
 
     anomalies = run_anomaly_detection_for_logs(logs, source_filter)
@@ -1872,7 +2324,8 @@ def inject_real_anomaly(request):
         att_cat = normalize_attack_category(etype, cat)
         defs    = _EVENT_DEFAULTS.get(etype, {})
 
-        import re as _re, random as _rnd
+        import re as _re
+        import random as _rnd  # nosec B311 — synthetic network feature values, not security use
         _SRC = _re.compile(r'src=(\d+\.\d+\.\d+\.\d+)')
         _DST = _re.compile(r'dst=(\d+\.\d+\.\d+\.\d+)')
         _DPT = _re.compile(r'DPT=(\d+)')
@@ -1889,9 +2342,9 @@ def inject_real_anomaly(request):
                         or defs.get('port'))
         src_ip       = data.get('src_ip') or (src_m.group(1) if src_m else None)
         dst_ip       = data.get('dst_ip') or (dst_m.group(1) if dst_m else None)
-        duration     = data.get('duration')     or (round(_rnd.uniform(*defs['duration']), 6)     if defs else None)
-        packets_sent = data.get('packets_sent') or (_rnd.randint(*defs['packets'])                 if defs else None)
-        bytes_sent   = data.get('bytes_sent')   or (_rnd.randint(*defs['bytes'])                   if defs else None)
+        duration     = data.get('duration')     or (round(_rnd.uniform(*defs['duration']), 6) if defs else None)  # nosec B311
+        packets_sent = data.get('packets_sent') or (_rnd.randint(*defs['packets'])             if defs else None)  # nosec B311
+        bytes_sent   = data.get('bytes_sent')   or (_rnd.randint(*defs['bytes'])               if defs else None)  # nosec B311
 
         log = Log.objects.create(
             source=source, message=msg, level=level,
@@ -1936,6 +2389,32 @@ def inject_real_anomaly(request):
         }, status=201)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=400)
+
+# ── Correlation Endpoints ────────────────────────────────────────────
+
+@require_auth
+@require_http_methods(["GET"])
+def correlated_events_list(request):
+    """Return aggregated correlated events grouped by (src_ip, event_type)."""
+    from .services import get_correlated_events
+    results, total, page, page_size = get_correlated_events(request)
+    return JsonResponse({'results': results, 'count': total, 'page': page, 'page_size': page_size})
+
+
+@require_auth
+@require_http_methods(["POST"])
+def run_correlation(request):
+    """Trigger log correlation/aggregation. Body: { window_minutes, min_events }."""
+    from .services import correlate_logs
+    try:
+        data = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        data = {}
+    window_minutes = max(1, int(data.get('window_minutes', 10)))
+    min_events = max(2, int(data.get('min_events', 2)))
+    affected_ids = correlate_logs(window_minutes=window_minutes, min_events=min_events)
+    return JsonResponse({'status': 'ok', 'correlated_groups': len(affected_ids), 'ids': affected_ids})
+
 
 # ── Rules Endpoints ──────────────────────────────────────────────────────────
 
@@ -2034,6 +2513,9 @@ def _threshold_to_dict(t):
 def rules_list(request):
     from .models import Rule
     if request.method == 'GET':
+        # Auto-seed defaults the very first time the table is empty
+        if not Rule.objects.exists():
+            _seed_default_rules(Rule)
         rules = Rule.objects.all().order_by('-created_at')
         return JsonResponse({'results': [_rule_to_dict(r) for r in rules], 'count': rules.count()})
 
@@ -2083,79 +2565,25 @@ def rule_detail(request, rule_id):
         return JsonResponse({'error': str(e)}, status=400)
 
 
+def _seed_default_rules(Rule):
+    defaults = [
+        {'name': 'AI Anomaly Detection', 'description': 'Trigger alert when ML anomaly score exceeds 0.8 — primary AI-driven detection rule.', 'rule_type': 'ml', 'condition': 'anomaly_score > 0.8', 'severity': 'high', 'action': 'alert', 'enabled': True, 'time_window': 0},
+        {'name': 'Brute Force Detection', 'description': 'Alert when more than 5 failed logins from the same IP occur within 5 minutes.', 'rule_type': 'behavior', 'condition': 'count(event_type == "Login Failed" AND same src_ip) > 5', 'severity': 'high', 'action': 'alert', 'enabled': True, 'time_window': 5},
+        {'name': 'SQL Injection Detected', 'description': 'Block immediately when SQL injection pattern is found in log message.', 'rule_type': 'pattern', 'condition': '"sql injection" in message.lower()', 'severity': 'critical', 'action': 'block', 'enabled': True, 'time_window': 0},
+        {'name': 'Port Scan Detection', 'description': 'Alert when more than 10 unique ports are scanned by the same IP within 1 minute.', 'rule_type': 'behavior', 'condition': 'count(unique_ports from same src_ip) > 10', 'severity': 'medium', 'action': 'alert', 'enabled': True, 'time_window': 1},
+        {'name': 'Privilege Escalation', 'description': 'Alert on any sudo or privilege escalation attempt.', 'rule_type': 'pattern', 'condition': '"privilege escalation" in message.lower() OR "sudo:" in message', 'severity': 'critical', 'action': 'alert', 'enabled': True, 'time_window': 0},
+        {'name': 'Anomaly Score Threshold Breach', 'description': 'Escalate to block when anomaly score exceeds 0.95 (critical confidence).', 'rule_type': 'threshold', 'condition': 'anomaly_score > 0.95', 'severity': 'critical', 'action': 'block', 'enabled': True, 'time_window': 0},
+    ]
+    return [Rule.objects.create(**d) for d in defaults]
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def rules_reset(request):
     """Reset all rules to clean, correct defaults."""
     from .models import Rule
     Rule.objects.all().delete()
-    defaults = [
-        {
-            'name': 'AI Anomaly Detection',
-            'description': 'Trigger alert when ML anomaly score exceeds 0.8 — primary AI-driven detection rule.',
-            'rule_type': 'ml',
-            'condition': 'anomaly_score > 0.8',
-            'severity': 'high',
-            'action': 'alert',
-            'enabled': True,
-            'time_window': 0,
-        },
-        {
-            'name': 'Brute Force Detection',
-            'description': 'Alert when more than 5 failed logins from the same IP occur within 5 minutes.',
-            'rule_type': 'behavior',
-            'condition': 'count(event_type == "Login Failed" AND same src_ip) > 5',
-            'severity': 'high',
-            'action': 'alert',
-            'enabled': True,
-            'time_window': 5,
-        },
-        {
-            'name': 'SQL Injection Detected',
-            'description': 'Block immediately when SQL injection pattern is found in log message.',
-            'rule_type': 'pattern',
-            'condition': '"sql injection" in message.lower()',
-            'severity': 'critical',
-            'action': 'block',
-            'enabled': True,
-            'time_window': 0,
-        },
-        {
-            'name': 'Port Scan Detection',
-            'description': 'Alert when more than 10 unique ports are scanned by the same IP within 1 minute.',
-            'rule_type': 'behavior',
-            'condition': 'count(unique_ports from same src_ip) > 10',
-            'severity': 'medium',
-            'action': 'alert',
-            'enabled': True,
-            'time_window': 1,
-        },
-        {
-            'name': 'Privilege Escalation',
-            'description': 'Alert on any sudo or privilege escalation attempt.',
-            'rule_type': 'pattern',
-            'condition': '"privilege escalation" in message.lower() OR "sudo:" in message',
-            'severity': 'critical',
-            'action': 'alert',
-            'enabled': True,
-            'time_window': 0,
-        },
-        {
-            'name': 'Anomaly Score Threshold Breach',
-            'description': 'Escalate to block when anomaly score exceeds 0.95 (critical confidence).',
-            'rule_type': 'threshold',
-            'condition': 'anomaly_score > 0.95',
-            'severity': 'critical',
-            'action': 'block',
-            'enabled': True,
-            'time_window': 0,
-        },
-    ]
-    created = []
-    for d in defaults:
-        r = Rule.objects.create(**d)
-        created.append(_rule_to_dict(r))
-    return JsonResponse({'status': 'reset', 'results': created})
+    return JsonResponse({'status': 'reset', 'results': [_rule_to_dict(r) for r in _seed_default_rules(Rule)]})
 
 
 @csrf_exempt
@@ -2272,179 +2700,71 @@ def _filter_logs(source=None):
     return logs
 
 
-_RANGE_MAP = {
-    '30min': timedelta(minutes=30),
-    '1h':    timedelta(hours=1),
-    '24h':   timedelta(hours=24),
-    '7d':    timedelta(days=7),
-    '30d':   timedelta(days=30),
-}
+_RANGE_MAP = TIME_RANGE_MAP
 
 def _apply_filters(qs, request, ts_field='timestamp'):
-    """Apply time-range and source filters to a queryset.
-    ts_field: 'timestamp' for Log, 'log__timestamp' for Anomaly.
-    """
-    from django.utils import timezone
-    source = request.GET.get('source')
-    range_key = request.GET.get('range', request.GET.get('time_range', ''))
-    if source and source != 'all':
-        src_field = 'source__iexact' if ts_field == 'timestamp' else 'log__source__iexact'
-        qs = qs.filter(**{src_field: source})
-    delta = _RANGE_MAP.get(range_key)
-    if delta:
-        qs = qs.filter(**{f'{ts_field}__gte': timezone.now() - delta})
-    return qs
+    from .services import apply_time_and_source_filter
+    return apply_time_and_source_filter(qs, request, ts_field)
 
 
 # Analytics Endpoints
+@require_auth
 @require_http_methods(["GET"])
 def analytics_summary(request):
-    from .models import Log, Anomaly
-    logs = _apply_filters(Log.objects.all(), request)
-    total_events = logs.count()
-    false_positives = _apply_filters(
-        Anomaly.objects.filter(status='false_positive').select_related('log'),
-        request, ts_field='log__timestamp'
-    ).count() if total_events else 0
-    detection_accuracy = round(min((total_events - false_positives) / total_events * 100, 100.0), 1) if total_events else 0.0
-    return JsonResponse({
-        'total_events': total_events,
-        'false_positives': false_positives,
-        'detection_accuracy': detection_accuracy,
-        'avg_response_time': 2.3,
-        'system_uptime': 99.9,
-    })
+    from .services import get_analytics_summary
+    return JsonResponse(get_analytics_summary(request))
 
 
+@require_auth
 @require_http_methods(["GET"])
 def analytics_severity_distribution(request):
-    from .models import Log
-    from django.db.models import Count
-    logs = _apply_filters(Log.objects.all(), request)
-    rows = logs.values('severity').annotate(count=Count('id'))
-    severity_counts = {row['severity'].lower(): row['count'] for row in rows if row['severity']}
-    if not severity_counts:
-        severity_counts = {'low': 20, 'medium': 15, 'high': 10, 'critical': 5}
-    return JsonResponse({
-        'severity_distribution': [
-            {'severity': s, 'count': c} for s, c in severity_counts.items() if c > 0
-        ]
-    })
+    from .services import get_severity_distribution
+    return JsonResponse({'severity_distribution': get_severity_distribution(request)})
 
 
-# Human-readable labels for event_type codes
-_EVENT_TYPE_LABELS = {
-    'PORT_SCAN': 'Port Scan', 'BRUTE_FORCE': 'Brute Force',
-    'SQL_INJECTION': 'SQL Injection', 'XSS_ATTACK': 'XSS Attack',
-    'PRIVILEGE_ESCALATION': 'Privilege Escalation', 'MALWARE_ACTIVITY': 'Malware',
-    'DDOS_ATTACK': 'DDoS Attack', 'DOS_ATTACK': 'DoS Attack',
-    'FIREWALL_BLOCK': 'Firewall Block', 'LOGIN_FAILED': 'Login Failed',
-    'LOGIN_SUCCESS': 'Login Success', 'CONFIG_CHANGE': 'Config Change',
-    'FILE_ACCESS': 'File Access', 'EXPLOIT_ATTEMPT': 'Exploit Attempt',
-    'BACKDOOR': 'Backdoor', 'SHELLCODE': 'Shellcode',
-    'RECONNAISSANCE': 'Reconnaissance', 'WORM': 'Worm',
-    'FUZZER': 'Fuzzer', 'GENERIC_ATTACK': 'Generic Attack', 'UNKNOWN': 'Unknown',
-}
-
+@require_auth
 @require_http_methods(["GET"])
 def analytics_event_types(request):
-    from .models import Log
-    from django.db.models import Count
-    limit = int(request.GET.get('limit', 10))
-    logs = _apply_filters(Log.objects.all(), request)
-    rows = logs.values('event_type').annotate(count=Count('id')).order_by('-count')[:limit]
-    if not rows:
-        return JsonResponse({'event_types': [{'event_type': 'Port Scan', 'count': 30}]})
-    return JsonResponse({
-        'event_types': [
-            {'event_type': _EVENT_TYPE_LABELS.get(row['event_type'], row['event_type']), 'count': row['count']}
-            for row in rows
-        ]
-    })
+    from .services import get_event_type_counts
+    limit = min(max(int(request.GET.get('limit', 10) or 10), 1), 50)
+    return JsonResponse({'event_types': get_event_type_counts(request, limit)})
 
 
+@require_auth
 @require_http_methods(["GET"])
 def analytics_source_metrics(request):
-    from .models import Log, Anomaly
-    from django.db.models import Count, Case, When, IntegerField, Sum, Q
-    logs = _apply_filters(Log.objects.all(), request)
-    breakdown = logs.values('source').annotate(
-        total=Count('id'),
-        critical=Sum(Case(When(level='CRITICAL', then=1), default=0, output_field=IntegerField())),
-        high=Sum(Case(When(level='ERROR', then=1), default=0, output_field=IntegerField())),
-        medium=Sum(Case(When(level='WARNING', then=1), default=0, output_field=IntegerField())),
-        low=Sum(Case(When(level='INFO', then=1), default=0, output_field=IntegerField())),
-    ).order_by('-total')
-    # False positives: cumulative per source (not time-filtered — it's a quality metric)
-    fp_qs = Anomaly.objects.filter(
-        Q(status='false_positive') | Q(log__severity='LOW')
-    ).distinct().values('log__source').annotate(count=Count('id'))
-    fp_map = {row['log__source']: row['count'] for row in fp_qs}
-    return JsonResponse({'source_metrics': {
-        row['source']: {
-            'total': row['total'],
-            'critical': row['critical'] or 0,
-            'high': row['high'] or 0,
-            'medium': row['medium'] or 0,
-            'low': row['low'] or 0,
-            'false_positives': fp_map.get(row['source'], 0),
-            'duplicates': 0,
-        } for row in breakdown
-    }})
+    from .services import get_source_metrics
+    return JsonResponse({'source_metrics': get_source_metrics(request)})
 
 
+@require_auth
 @require_http_methods(["GET"])
 def analytics_hourly_trends(request):
-    """Get hourly event trends from DB logs."""
-    from .models import Log
-    from django.utils import timezone
-    now = timezone.now()
-    buckets = {}
-    for i in range(24):
-        hour_label = (now - timedelta(hours=23 - i)).strftime('%H:00')
-        buckets[hour_label] = {'hour': hour_label, 'events': 0, 'critical': 0, 'detected': 0}
-
-    source_filter = request.GET.get('source')
-    logs = Log.objects.filter(timestamp__gte=now - timedelta(hours=24))
-    if source_filter and source_filter != 'all':
-        logs = logs.filter(source=source_filter)
-
-    for log in logs:
-        label = log.timestamp.strftime('%H:00')
-        if label in buckets:
-            buckets[label]['events'] += 1
-            if log.level in ['ERROR', 'CRITICAL', 'ALERT']:
-                buckets[label]['critical'] += 1
-            buckets[label]['detected'] += 1
-
-    return JsonResponse({'hourly_trends': list(buckets.values())})
+    from .services import get_hourly_trends
+    return JsonResponse({'hourly_trends': get_hourly_trends(request)})
 
 
+@require_http_methods(["GET"])
+def analytics_top_hosts(request):
+    from .services import get_top_hosts
+    limit = min(int(request.GET.get('limit', 10)), 50)
+    return JsonResponse({'top_hosts': get_top_hosts(request, limit)})
+
+
+@require_auth
 @require_http_methods(["GET"])
 def analytics_response_metrics(request):
-    """Get response time metrics."""
-    return JsonResponse({
-        'avg_response_time': 2.3,
-        'min_response_time': 0.1,
-        'max_response_time': 45.6,
-        'median_response_time': 1.8,
-        'p95_response_time': 12.5,
-        'p99_response_time': 35.2,
-    })
+    """Get response time metrics from resolved/updated anomaly records."""
+    from .services import get_response_metrics
+    return JsonResponse(get_response_metrics(request))
 
 
+@require_auth
 @require_http_methods(["GET"])
 def analytics_detection_accuracy(request):
-    """Detection accuracy derived from UNSW-NB15 attack category distribution."""
-    # Accuracy estimates based on category difficulty in UNSW-NB15 literature
-    return JsonResponse({
-        'accuracy_by_severity': [
-            {'severity': 'critical', 'accuracy': 97.8, 'false_positive_rate': 1.1},  # Exploits, Backdoor, Shellcode
-            {'severity': 'high', 'accuracy': 95.4, 'false_positive_rate': 2.3},      # Generic, Reconnaissance
-            {'severity': 'medium', 'accuracy': 91.6, 'false_positive_rate': 3.8},    # Fuzzers, Analysis
-            {'severity': 'low', 'accuracy': 88.2, 'false_positive_rate': 4.9},       # DoS, Worms
-        ]
-    })
+    """Detection accuracy derived from current logs and false-positive anomalies."""
+    from .services import get_detection_accuracy_by_severity
+    return JsonResponse({'accuracy_by_severity': get_detection_accuracy_by_severity(request)})
 
 
 @require_http_methods(["GET"])
@@ -2459,6 +2779,7 @@ def analytics_top_hosts(request):
     })
 
 
+@require_auth
 @require_http_methods(["GET"])
 def analytics_export(request):
     """Export analytics data as CSV"""
@@ -2476,11 +2797,429 @@ def analytics_export(request):
     response['Content-Disposition'] = 'attachment; filename="siem-report.csv"'
 
     writer = csv.writer(response)
-    writer.writerow(['ID', 'Source', 'Event Type', 'Severity', 'Source IP', 'Destination IP', 'Message', 'Timestamp', 'Duplicate', 'False Positive'])
+    writer.writerow(['ID', 'Source', 'Event Type', 'Severity', 'Source IP', 'Destination IP', 'Message', 'Timestamp', 'Duplicate', 'False Positive', 'Analyst Status'])
     for log in logs:
         writer.writerow([
             log['id'], log['source'], log['event_type'], log['severity'],
             log['source_ip'], log['destination_ip'], log['message'],
-            log['timestamp'], log['duplicate'], log['false_positive'],
+            log['timestamp'], log['duplicate'], log['false_positive'], log.get('status_label', 'No Anomaly'),
         ])
     return response
+
+
+@require_auth
+@require_http_methods(["GET"])
+def evaluation_metrics(request):
+    """
+    Compute AI/ML evaluation metrics for the SIEM system.
+    
+    Metrics:
+    - Accuracy: (TP + TN) / (TP + TN + FP + FN)
+    - Precision: TP / (TP + FP)
+    - Recall: TP / (TP + FN)
+    - F1-Score: 2 * (Precision * Recall) / (Precision + Recall)
+    - False Positive Rate: FP / (FP + TN)
+    - Response Time: avg, p50, p95, p99 in milliseconds
+    - Detection by Severity
+    - Detection by Event Type
+    """
+    from .models import Log, Anomaly
+    import numpy as np
+    from datetime import timedelta
+    
+    # Collect all labeled anomalies (confirmed or false_positive)
+    labeled_anomalies = Anomaly.objects.filter(status__in=['confirmed', 'false_positive']).select_related('log')
+    
+    if not labeled_anomalies.exists():
+        # Not enough labeled data; return empty metrics
+        return JsonResponse({
+            'accuracy': 0.0,
+            'precision': 0.0,
+            'recall': 0.0,
+            'f1_score': 0.0,
+            'false_positive_rate': 0.0,
+            'response_time': {'avg': 0.0, 'p50': 0.0, 'p95': 0.0, 'p99': 0.0},
+            'total_events': 0,
+            'total_anomalies': 0,
+            'total_false_positives': 0,
+            'detection_by_severity': {},
+            'detection_by_event_type': {},
+            'message': 'No labeled anomalies available for evaluation',
+        })
+    
+    # Build arrays for sklearn metrics
+    # y_true: ground truth (1 = threat, 0 = benign)
+    # y_pred: model prediction (1 = score >= 0.45, 0 = score < 0.45)
+    y_true = []
+    y_pred = []
+    response_times = []
+    
+    for anom in labeled_anomalies:
+        log = anom.log
+        # Ground truth: confirmed = 1, false_positive = 0
+        is_threat = 1 if anom.status == 'confirmed' else 0
+        y_true.append(is_threat)
+        
+        # Prediction: model predicted threat (anomaly_score >= 0.45)
+        predicted_threat = 1 if log.anomaly_score >= 0.45 else 0
+        y_pred.append(predicted_threat)
+        
+        if log.response_time_ms > 0:
+            response_times.append(log.response_time_ms)
+    
+    # Compute metrics
+    try:
+        acc = accuracy_score(y_true, y_pred)
+        prec = precision_score(y_true, y_pred, zero_division=0)
+        rec = recall_score(y_true, y_pred, zero_division=0)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+        
+        # False Positive Rate: FP / (FP + TN)
+        cm = confusion_matrix(y_true, y_pred)
+        tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+    except Exception:
+        acc = prec = rec = f1 = fpr = 0.0
+        tp = fp = tn = fn = 0
+    
+    # Response time percentiles
+    if response_times:
+        rt_avg = float(np.mean(response_times))
+        rt_p50 = float(np.percentile(response_times, 50))
+        rt_p95 = float(np.percentile(response_times, 95))
+        rt_p99 = float(np.percentile(response_times, 99))
+    else:
+        rt_avg = rt_p50 = rt_p95 = rt_p99 = 0.0
+    
+    # Detection by severity
+    severity_stats = {}
+    for sev in ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']:
+        anom_count = labeled_anomalies.filter(log__severity__iexact=sev).count()
+        confirmed_count = labeled_anomalies.filter(log__severity__iexact=sev, status='confirmed').count()
+        severity_stats[sev] = {
+            'total': anom_count,
+            'confirmed': confirmed_count,
+            'detection_rate': (confirmed_count / anom_count * 100) if anom_count > 0 else 0.0
+        }
+    
+    # Detection by event type (top 10)
+    event_type_stats = {}
+    event_types = labeled_anomalies.values_list('log__event_type', flat=True).distinct()[:10]
+    for etype in event_types:
+        anom_count = labeled_anomalies.filter(log__event_type=etype).count()
+        confirmed_count = labeled_anomalies.filter(log__event_type=etype, status='confirmed').count()
+        event_type_stats[etype] = {
+            'total': anom_count,
+            'confirmed': confirmed_count,
+            'detection_rate': (confirmed_count / anom_count * 100) if anom_count > 0 else 0.0
+        }
+    
+    total_events = Log.objects.count()
+    total_anomalies = labeled_anomalies.count()
+    total_false_positives = labeled_anomalies.filter(status='false_positive').count()
+    
+    return JsonResponse({
+        'accuracy': round(float(acc), 4),
+        'precision': round(float(prec), 4),
+        'recall': round(float(rec), 4),
+        'f1_score': round(float(f1), 4),
+        'false_positive_rate': round(float(fpr), 4),
+        'confusion_matrix': {
+            'true_positives': int(tp),
+            'false_positives': int(fp),
+            'true_negatives': int(tn),
+            'false_negatives': int(fn),
+        },
+        'response_time': {
+            'avg': round(rt_avg, 2),
+            'p50': round(rt_p50, 2),
+            'p95': round(rt_p95, 2),
+            'p99': round(rt_p99, 2),
+        },
+        'total_events': total_events,
+        'total_anomalies': total_anomalies,
+        'total_false_positives': total_false_positives,
+        'detection_by_severity': severity_stats,
+        'detection_by_event_type': event_type_stats,
+    })
+
+
+@require_auth
+@require_http_methods(["GET"])
+def ai_analysis(request):
+    """
+    Industry-standard AI analysis endpoint.
+    Returns: threat classification, anomaly timeline, risk prediction, recommendations.
+    """
+    from .models import Log, Anomaly
+    from django.db.models import Count, Avg, Max
+    from datetime import timedelta
+
+    now = timezone.now()
+    window_24h = now - timedelta(hours=24)
+    window_7d  = now - timedelta(days=7)
+
+    # ── 1. Threat Classification ──────────────────────────────────────────────
+    anomalies = Anomaly.objects.select_related('log').filter(created_at__gte=window_24h)
+    total_anomalies = anomalies.count()
+
+    threat_classes = {}
+    for a in anomalies:
+        label = a.anomaly_type or 'Unknown'
+        if label not in threat_classes:
+            threat_classes[label] = {'count': 0, 'max_score': 0.0, 'severity': 'low'}
+        threat_classes[label]['count'] += 1
+        threat_classes[label]['max_score'] = max(threat_classes[label]['max_score'], a.score)
+
+    for k, v in threat_classes.items():
+        s = v['max_score']
+        v['severity'] = 'critical' if s >= 0.9 else 'high' if s >= 0.75 else 'medium' if s >= 0.45 else 'low'
+        v['confidence'] = round(s * 100, 1)
+
+    threat_classification = sorted(
+        [{'type': k, **v} for k, v in threat_classes.items()],
+        key=lambda x: x['max_score'], reverse=True
+    )[:10]
+
+    # ── 2. Anomaly Timeline (hourly buckets, last 24h) ─────────────────────────
+    timeline = []
+    for h in range(23, -1, -1):
+        bucket_start = now - timedelta(hours=h+1)
+        bucket_end   = now - timedelta(hours=h)
+        count  = anomalies.filter(created_at__gte=bucket_start, created_at__lt=bucket_end).count()
+        logs_c = Log.objects.filter(timestamp__gte=bucket_start, timestamp__lt=bucket_end).count()
+        avg_score = anomalies.filter(
+            created_at__gte=bucket_start, created_at__lt=bucket_end
+        ).aggregate(a=Avg('score'))['a'] or 0.0
+        timeline.append({
+            'hour': bucket_start.strftime('%H:00'),
+            'anomalies': count,
+            'total_logs': logs_c,
+            'avg_score': round(avg_score, 3),
+        })
+
+    # ── 3. Risk Prediction (trend-based) ─────────────────────────────────────
+    prev_24h = Anomaly.objects.filter(
+        created_at__gte=window_7d, created_at__lt=window_24h
+    ).count()
+    trend_ratio = (total_anomalies / max(prev_24h, 1))
+    risk_score  = round(min(trend_ratio * 0.5 + (total_anomalies / max(Log.objects.filter(
+        timestamp__gte=window_24h).count(), 1)) * 0.5, 1.0), 3)
+
+    critical_count = anomalies.filter(score__gte=0.9).count()
+    high_count     = anomalies.filter(score__gte=0.75, score__lt=0.9).count()
+    medium_count   = anomalies.filter(score__gte=0.45, score__lt=0.75).count()
+
+    risk_level = 'critical' if risk_score >= 0.75 else 'high' if risk_score >= 0.5 else 'medium' if risk_score >= 0.25 else 'low'
+
+    # 7-day daily trend for sparkline
+    daily_trend = []
+    for d in range(6, -1, -1):
+        day_start = now - timedelta(days=d+1)
+        day_end   = now - timedelta(days=d)
+        c = Anomaly.objects.filter(created_at__gte=day_start, created_at__lt=day_end).count()
+        daily_trend.append({'day': day_start.strftime('%a'), 'anomalies': c})
+
+    # ── 4. Recommendations ────────────────────────────────────────────────────
+    recommendations = []
+    top_types = [t['type'] for t in threat_classification[:5]]
+
+    RECO_MAP = {
+        'Brute Force':           {'action': 'Block repeated failed logins',            'priority': 'critical', 'detail': 'Enforce account lockout after 5 failures; enable MFA on all SSH/RDP endpoints.'},
+        'Suspicious Login':      {'action': 'Investigate abnormal login patterns',      'priority': 'high',     'detail': 'Review login times and source IPs; force password reset for affected accounts.'},
+        'Network Intrusion':     {'action': 'Update firewall rules',                    'priority': 'critical', 'detail': 'Block source IPs triggering UFW rules; review inbound ACLs.'},
+        'Web Application Attack':{'action': 'Enable WAF and patch endpoints',           'priority': 'critical', 'detail': 'Deploy ModSecurity rules; sanitize all user inputs; audit SQL queries.'},
+        'Privilege Escalation':  {'action': 'Audit sudo and privileged access',         'priority': 'critical', 'detail': 'Review sudoers file; apply principle of least privilege; alert on pkexec.'},
+        'Unauthorized Access':   {'action': 'Revoke sessions and rotate credentials',   'priority': 'high',     'detail': 'Invalidate active tokens; rotate API keys; notify affected users.'},
+        'Port Scan':             {'action': 'Block scanning source IPs',                'priority': 'medium',   'detail': 'Add IDS rule to auto-block IPs scanning >10 ports/min.'},
+        'Malware Activity':      {'action': 'Isolate affected host immediately',         'priority': 'critical', 'detail': 'Run ClamAV scan; kill suspicious processes; restore from clean snapshot.'},
+        'High severity event':   {'action': 'Escalate to SOC for manual review',        'priority': 'high',     'detail': 'Collect forensic artifacts; open incident ticket.'},
+        'Worms':                 {'action': 'Contain and eradicate worm propagation',   'priority': 'critical', 'detail': 'Isolate infected hosts; block lateral movement on SMB/445; patch MS17-010 and similar vulnerabilities.'},
+        'Backdoor':              {'action': 'Remove backdoor and harden access',        'priority': 'critical', 'detail': 'Kill the backdoor process; close unusual listening ports; audit scheduled tasks and startup scripts.'},
+        'Exploits':              {'action': 'Patch exploited vulnerabilities immediately','priority': 'critical', 'detail': 'Apply vendor patches; enable exploit mitigations (ASLR, DEP); run vulnerability scan on affected hosts.'},
+        'Reconnaissance':        {'action': 'Block reconnaissance sources',             'priority': 'medium',   'detail': 'Drop traffic from scanning IPs; enable honeypots; review exposed service inventory.'},
+        'DoS':                   {'action': 'Activate DDoS mitigation',                 'priority': 'critical', 'detail': 'Enable rate limiting; engage upstream scrubbing; null-route attacking CIDRs.'},
+        'Shellcode':             {'action': 'Investigate shellcode execution',           'priority': 'critical', 'detail': 'Terminate suspicious processes; collect memory dump for forensics; re-image affected system.'},
+        'Fuzzer':                {'action': 'Harden exposed endpoints against fuzzing',  'priority': 'medium',   'detail': 'Enable input validation; review API rate limits; block fuzzing user-agents at WAF.'},
+        'Generic':               {'action': 'Review and classify anomalous activity',   'priority': 'medium',   'detail': 'Correlate with other events; escalate if pattern persists within the hour.'},
+        'System Instability':    {'action': 'Investigate system instability signals',   'priority': 'high',     'detail': 'Check kernel logs and OOM events; review recent deployments; ensure disk and memory thresholds.'},
+        'baseline':              {'action': 'Continue monitoring',                       'priority': 'low',      'detail': 'No immediate action required; maintain standard alerting thresholds.'},
+    }
+
+    seen = set()
+    for t in top_types:
+        r = RECO_MAP.get(t) or RECO_MAP.get('Generic')
+        if r and t not in seen:
+            recommendations.append({'threat_type': t, **r})
+            seen.add(t)
+
+    if critical_count > 5 and 'critical_volume' not in seen:
+        recommendations.append({
+            'threat_type': 'High Threat Volume',
+            'action': f'Incident response: {critical_count} critical threats in 24h',
+            'priority': 'critical',
+            'detail': 'Activate incident response plan; notify CISO; preserve logs for forensics.',
+        })
+
+    if not recommendations:
+        recommendations.append(RECO_MAP['baseline'] | {'threat_type': 'Normal Activity'})
+
+    # ── 5. Model performance snapshot ────────────────────────────────────────
+    total_logs = Log.objects.filter(timestamp__gte=window_24h).count()
+    fp_count   = anomalies.filter(status='false_positive').count()
+    tp_count   = anomalies.filter(score__gte=0.6).exclude(status='false_positive').count()
+    precision  = round(tp_count / max(tp_count + fp_count, 1) * 100, 1)
+
+    return JsonResponse({
+        'threat_classification': threat_classification,
+        'anomaly_timeline': timeline,
+        'risk_prediction': {
+            'risk_score': risk_score,
+            'risk_level': risk_level,
+            'trend_ratio': round(trend_ratio, 2),
+            'critical_count': critical_count,
+            'high_count': high_count,
+            'medium_count': medium_count,
+            'total_anomalies_24h': total_anomalies,
+            'daily_trend': daily_trend,
+        },
+        'recommendations': recommendations,
+        'model_performance': {
+            'precision': precision,
+            'total_logs_24h': total_logs,
+            'anomalies_detected': total_anomalies,
+            'false_positives': fp_count,
+            'detection_rate': round(total_anomalies / max(total_logs, 1) * 100, 1),
+        },
+    })
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def simulate_attack(request):
+    """
+    Simulate an attack on the SIEM target machine for demo purposes.
+    Body: { "attack_type": "ddos" | "port_scan" | "brute_force" | "malware" | "reconnaissance" }
+    Creates a burst of realistic attack logs and returns them.
+    """
+    import random
+    from datetime import datetime
+    from .models import Log, Anomaly
+
+    try:
+        data = json.loads(request.body)
+    except Exception:
+        data = {}
+
+    attack_type = data.get('attack_type', 'ddos').lower()
+    hostname = 'ubuntu-server'
+    ts = datetime.now().strftime('%b %d %H:%M:%S')
+
+    ATTACKS = {
+        'ddos': {
+            'event_type': 'DDOS_ATTACK',
+            'level': 'CRITICAL',
+            'source': 'network-monitor',
+            'attack_category': 'DoS',
+            'severity': 'CRITICAL',
+            'score': 0.95,
+            'dataset_type': 'network',
+            'logs': [
+                f"{ts} {hostname} kernel[0]: DDOS flood detected src=203.0.113.{random.randint(1,254)} dst=10.0.0.1 proto=udp packets=50000 bytes=75000000",
+                f"{ts} {hostname} firewall[1]: DROP UDP src=198.51.100.{random.randint(1,254)} dst=10.0.0.1 DPT=80 flood=true",
+                f"{ts} {hostname} ids-system[2]: ALERT DDoS amplification attack src=192.0.2.{random.randint(1,254)} rate=120000pps",
+            ],
+        },
+        'port_scan': {
+            'event_type': 'PORT_SCAN',
+            'level': 'WARNING',
+            'source': 'network-monitor',
+            'attack_category': 'Reconnaissance',
+            'severity': 'MEDIUM',
+            'score': 0.72,
+            'dataset_type': 'network',
+            'logs': [
+                f"{ts} {hostname} ids-system[0]: PORT_SCAN detected src=192.168.1.{random.randint(1,254)} scanned_ports=1-1024 proto=tcp",
+                f"{ts} {hostname} firewall[1]: SCAN src=10.10.10.{random.randint(1,254)} DPT=22 flags=SYN",
+                f"{ts} {hostname} network-monitor[2]: Nmap scan detected src=172.16.0.{random.randint(1,254)} os_detection=true",
+            ],
+        },
+        'brute_force': {
+            'event_type': 'BRUTE_FORCE',
+            'level': 'ERROR',
+            'source': 'auth-service',
+            'attack_category': 'Brute Force',
+            'severity': 'HIGH',
+            'score': 0.88,
+            'dataset_type': 'host',
+            'logs': [
+                f"{ts} {hostname} sshd[{random.randint(1000,9999)}]: Failed password for root from 192.168.1.{random.randint(1,254)} port 22 ssh2",
+                f"{ts} {hostname} sshd[{random.randint(1000,9999)}]: Failed password for admin from 10.0.0.{random.randint(1,254)} port 22 ssh2",
+                f"{ts} {hostname} sshd[{random.randint(1000,9999)}]: Accepted password for root from 192.168.1.50 port 22 ssh2",
+            ],
+        },
+        'malware': {
+            'event_type': 'MALWARE_ACTIVITY',
+            'level': 'CRITICAL',
+            'source': 'filesystem',
+            'attack_category': 'Backdoor',
+            'severity': 'CRITICAL',
+            'score': 0.97,
+            'dataset_type': 'host',
+            'logs': [
+                f"{ts} {hostname} clamav[{random.randint(1000,9999)}]: FOUND Trojan.Backdoor-123 in /tmp/.hidden/payload",
+                f"{ts} {hostname} auditd[{random.randint(1000,9999)}]: SYSCALL arch=x86_64 syscall=execve pid={random.randint(1000,9999)} cmd=/tmp/.hidden/payload",
+                f"{ts} {hostname} ids-system[0]: Reverse shell detected pid={random.randint(1000,9999)} dst=203.0.113.1 DPT=4444",
+            ],
+        },
+        'reconnaissance': {
+            'event_type': 'RECONNAISSANCE',
+            'level': 'WARNING',
+            'source': 'ids-system',
+            'attack_category': 'Reconnaissance',
+            'severity': 'MEDIUM',
+            'score': 0.65,
+            'dataset_type': 'network',
+            'logs': [
+                f"{ts} {hostname} ids-system[0]: Reconnaissance scan src=172.16.0.{random.randint(1,254)} type=OS_fingerprint",
+                f"{ts} {hostname} network-monitor[1]: DNS zone transfer attempt src=10.10.10.{random.randint(1,254)} target=siem.local",
+                f"{ts} {hostname} ids-system[2]: SNMP sweep detected src=192.168.1.{random.randint(1,254)} community=public",
+            ],
+        },
+    }
+
+    cfg = ATTACKS.get(attack_type, ATTACKS['ddos'])
+    created = []
+    import random as _rnd  # nosec B311
+    defs = _EVENT_DEFAULTS.get(cfg['event_type'], {})
+
+    for msg in cfg['logs']:
+        log = Log.objects.create(
+            source=cfg['source'],
+            message=msg,
+            level=cfg['level'],
+            event_type=cfg['event_type'],
+            severity=cfg['severity'],
+            attack_category=cfg['attack_category'],
+            dataset_type=cfg['dataset_type'],
+            anomaly_score=cfg['score'],
+            duration=round(_rnd.uniform(*defs['duration']), 6) if defs.get('duration') else None,    # nosec B311
+            packets_sent=_rnd.randint(*defs['packets']) if defs.get('packets') else None,              # nosec B311
+            bytes_sent=_rnd.randint(*defs['bytes']) if defs.get('bytes') else None,                    # nosec B311
+        )
+        Anomaly.objects.create(
+            log=log,
+            anomaly_type=cfg['attack_category'],
+            score=cfg['score'],
+            details=f"Demo attack simulation: {attack_type}",
+            status='confirmed',
+        )
+        created.append({
+            'id': log.id,
+            'message': log.message,
+            'event_type': log.event_type,
+            'severity': log.severity,
+            'timestamp': log.timestamp.isoformat(),
+        })
+
+    return JsonResponse({'attack_type': attack_type, 'logs_created': len(created), 'logs': created})

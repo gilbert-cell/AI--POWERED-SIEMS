@@ -1,3 +1,9 @@
 from django.contrib import admin
+from .models import Anomaly, Log, Rule, SystemSetting, Threshold, UserProfile
 
-# Register your models here.
+admin.site.register(Log)
+admin.site.register(Anomaly)
+admin.site.register(Rule)
+admin.site.register(Threshold)
+admin.site.register(UserProfile)
+admin.site.register(SystemSetting)

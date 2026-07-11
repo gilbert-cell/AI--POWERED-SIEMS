@@ -1,5 +1,5 @@
 import { authService } from '../services/api';
-import { DEFAULT_ROLE, ROLE_STORAGE_KEY } from './rbac';
+import { DEFAULT_ROLE, ROLE_STORAGE_KEY, normalizeRole } from './rbac';
 
 export const AUTH_TOKEN_KEY = 'auth_token';
 export const AUTH_USER_KEY = 'siem_auth_user';
@@ -12,7 +12,7 @@ const emitAuthChange = () => {
 const saveSessionUser = (user, token = null) => {
   const sessionUser = {
     ...user,
-    role: user.role || DEFAULT_ROLE,
+    role: normalizeRole(user.role || DEFAULT_ROLE),
     sessionStartedAt: new Date().toISOString(),
   };
 

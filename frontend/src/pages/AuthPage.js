@@ -10,6 +10,7 @@ import {
   BugReport as BugIcon,
 } from '@mui/icons-material';
 import { loginUser, resetPassword } from '../utils/auth';
+import { validateEmail } from '../utils/helpers';
 
 // ── Left panel feature bullets ────────────────────────────────────────────────
 const FEATURES = [
@@ -25,6 +26,26 @@ const STATS = [
   { value: '< 2s',  label: 'Response Time' },
   { value: '24/7',  label: 'Monitoring' },
 ];
+
+const EMPTY_FIELD_ERRORS = { email: '', password: '', confirm: '' };
+
+const validateAuthForm = (form, isForgot) => {
+  const errors = { ...EMPTY_FIELD_ERRORS };
+  const email = form.email.trim();
+
+  if (!email) errors.email = 'Email address is required.';
+  else if (!validateEmail(email)) errors.email = 'Enter a valid email address.';
+
+  if (isForgot) {
+    if (!form.password) errors.password = 'New password is required.';
+    else if (form.password.length < 6) errors.password = 'Password must be at least 6 characters.';
+
+    if (!form.confirm) errors.confirm = 'Please confirm your new password.';
+    else if (form.password !== form.confirm) errors.confirm = 'Passwords do not match.';
+  }
+
+  return errors;
+};
 
 // ── Floating particle dots (purely decorative) ────────────────────────────────
 const Particle = ({ style }) => (
@@ -50,25 +71,37 @@ const AuthPage = ({ mode = 'login' }) => {
   const [error, setError]       = useState('');
   const [success, setSuccess]   = useState('');
   const [loading, setLoading]   = useState(false);
+  const [fieldErrors, setFieldErrors] = useState(EMPTY_FIELD_ERRORS);
 
-  useEffect(() => { setError(''); setSuccess(''); }, [mode]);
+  useEffect(() => { setError(''); setSuccess(''); setFieldErrors(EMPTY_FIELD_ERRORS); }, [mode]);
 
-  const set = (k) => (e) => setForm((p) => ({ ...p, [k]: e.target.value }));
+  const set = (k) => (e) => {
+    setForm((p) => ({ ...p, [k]: e.target.value }));
+    setFieldErrors((p) => ({ ...p, [k]: '' }));
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setError(''); setSuccess(''); setLoading(true);
+    setError(''); setSuccess('');
+
+    const validationErrors = validateAuthForm(form, mode === 'forgot');
+    if (Object.values(validationErrors).some(Boolean)) {
+      setFieldErrors(validationErrors);
+      setError('Please fix the highlighted fields.');
+      return;
+    }
+
+    setLoading(true);
+    const email = form.email.trim();
     try {
       if (mode === 'login') {
-        await loginUser({ email: form.email, password: form.password });
+        await loginUser({ email, password: form.password });
         navigate(location.state?.from || '/dashboard', { replace: true });
         return;
       }
-      if (form.password.length < 6) throw new Error('Password must be at least 6 characters.');
-      if (form.password !== form.confirm) throw new Error('Passwords do not match.');
-      await resetPassword({ email: form.email, password: form.password });
+      await resetPassword({ email, password: form.password });
       setSuccess('Password updated. You can now sign in.');
-      setForm((p) => ({ ...p, password: '', confirm: '' }));
+      setForm((p) => ({ ...p, email, password: '', confirm: '' }));
     } catch (err) {
       setError(err.message || 'Something went wrong.');
     } finally {
@@ -103,25 +136,15 @@ const AuthPage = ({ mode = 'login' }) => {
         <Particle style={{ width: 60,  height: 60,  top: '70%',  left: '70%', animationDelay: '4s' }} />
         <Particle style={{ width: 40,  height: 40,  top: '85%',  left: '30%', animationDelay: '1s' }} />
 
-        {/* Logo */}
+        {/* Branding */}
         <Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 6 }}>
-            <Box sx={{
-              width: 44, height: 44, borderRadius: 2,
-              background: 'linear-gradient(135deg, #42a5f5, #1565c0)',
-              display: 'grid', placeItems: 'center',
-              boxShadow: '0 4px 15px rgba(66,165,245,0.4)',
-            }}>
-              <ShieldIcon sx={{ color: 'white', fontSize: 24 }} />
-            </Box>
-            <Box>
-              <Typography sx={{ color: 'white', fontWeight: 800, fontSize: 18, lineHeight: 1 }}>
-                AI SIEM
-              </Typography>
-              <Typography sx={{ color: 'rgba(255,255,255,0.5)', fontSize: 11, letterSpacing: 2 }}>
-                SECURITY PLATFORM
-              </Typography>
-            </Box>
+          <Box sx={{ mb: 6 }}>
+            <Typography sx={{ color: 'white', fontWeight: 800, fontSize: 18, lineHeight: 1 }}>
+              AI SIEM
+            </Typography>
+            <Typography sx={{ color: 'rgba(255,255,255,0.5)', fontSize: 11, letterSpacing: 2 }}>
+              SECURITY PLATFORM
+            </Typography>
           </Box>
 
           <Typography variant="h3" sx={{ color: 'white', fontWeight: 800, mb: 2, lineHeight: 1.2 }}>
@@ -193,14 +216,27 @@ const AuthPage = ({ mode = 'login' }) => {
           {success && <Alert severity="success" sx={{ mb: 2, borderRadius: 2 }}>{success}</Alert>}
 
           {/* Form */}
-          <Box component="form" onSubmit={handleSubmit} sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
-            <TextField label="Email Address" type="email" value={form.email} onChange={set('email')} required fullWidth
-              sx={inputSx} InputProps={{ sx: { borderRadius: 2 } }} />
+          <Box component="form" onSubmit={handleSubmit} noValidate sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
+            <TextField
+              label="Email Address"
+              type="email"
+              value={form.email}
+              onChange={set('email')}
+              error={!!fieldErrors.email}
+              helperText={fieldErrors.email}
+              required
+              fullWidth
+              sx={inputSx}
+              InputProps={{ sx: { borderRadius: 2 } }}
+            />
 
             <TextField
               label={isForgot ? 'New Password' : 'Password'}
               type={showPwd ? 'text' : 'password'}
-              value={form.password} onChange={set('password')} required fullWidth
+              value={form.password} onChange={set('password')}
+              error={!!fieldErrors.password}
+              helperText={fieldErrors.password}
+              required fullWidth
               sx={inputSx}
               InputProps={{
                 sx: { borderRadius: 2 },
@@ -218,7 +254,10 @@ const AuthPage = ({ mode = 'login' }) => {
               <TextField
                 label="Confirm Password"
                 type={showCfm ? 'text' : 'password'}
-                value={form.confirm} onChange={set('confirm')} required fullWidth
+                value={form.confirm} onChange={set('confirm')}
+                error={!!fieldErrors.confirm}
+                helperText={fieldErrors.confirm}
+                required fullWidth
                 sx={inputSx}
                 InputProps={{
                   sx: { borderRadius: 2 },
@@ -233,7 +272,6 @@ const AuthPage = ({ mode = 'login' }) => {
               />
             )}
 
-            {/* Forgot password link */}
             {!isForgot && (
               <Box sx={{ textAlign: 'right', mt: -1 }}>
                 <Box component={RouterLink} to="/forgot-password"

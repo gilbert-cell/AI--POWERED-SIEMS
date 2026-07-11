@@ -18,40 +18,30 @@ import {
   Memory as AIIcon,
   Security as AdminIcon,
   Monitor as MonitorIcon,
+  ManageSearch as LogMonitorIcon,
+  Assessment as EvaluationIcon,
 } from '@mui/icons-material';
-import { canAccessPath, getStoredRole, ROLE_CHANGE_EVENT } from '../../utils/rbac';
+import { canAccessPath, ROLE_CHANGE_EVENT } from '../../utils/rbac';
+import { useAuth } from '../../contexts/AuthContext';
 
 const DRAWER_WIDTH = 260;
 
 const menuItems = [
-  { label: 'Dashboard',       icon: DashboardIcon, path: '/dashboard'  },
-  { label: 'Alerts & Logs',   icon: LogsIcon,      path: '/logs'        },
-  { label: 'Log Viewer',      icon: MonitorIcon,   path: '/log-viewer'  },
-  { label: 'Behavior Analysis', icon: BehaviorIcon, path: '/behavior'  },
-  { label: 'Rules & Thresholds', icon: TuneIcon,   path: '/rules'       },
-  { label: 'AI Decisions',    icon: AIIcon,        path: '/ai-decisions'},
-  { label: 'Analytics',       icon: AnalyticsIcon, path: '/analytics'  },
-  { label: 'RBAC Admin',      icon: AdminIcon,     path: '/admin'       },
+  { label: 'Dashboard',         icon: DashboardIcon, path: '/dashboard'   },
+  { label: 'Alerts & Logs',     icon: LogsIcon,      path: '/logs'         },
+  { label: 'Log Monitoring',    icon: LogMonitorIcon, path: '/log-viewer'   },
+  { label: 'Behavior Analysis', icon: BehaviorIcon,  path: '/behavior'     },
+  { label: 'Rules & Thresholds',icon: TuneIcon,      path: '/rules'        },
+  { label: 'AI Decisions',      icon: AIIcon,        path: '/ai-decisions' },
+  { label: 'Analytics',         icon: AnalyticsIcon, path: '/analytics'    },
+  { label: 'Evaluation',        icon: EvaluationIcon,path: '/evaluation'   },
+  { label: 'RBAC Admin',        icon: AdminIcon,     path: '/admin'        },
 ];
 
 const Sidebar = ({ open, onClose }) => {
   const navigate = useNavigate();
   const location = useLocation();
-  const [currentRole, setCurrentRole] = React.useState(getStoredRole());
-
-  React.useEffect(() => {
-    const handleRoleChange = (event) => {
-      setCurrentRole(event.detail || getStoredRole());
-    };
-
-    window.addEventListener(ROLE_CHANGE_EVENT, handleRoleChange);
-    window.addEventListener('storage', handleRoleChange);
-
-    return () => {
-      window.removeEventListener(ROLE_CHANGE_EVENT, handleRoleChange);
-      window.removeEventListener('storage', handleRoleChange);
-    };
-  }, []);
+  const { currentRole } = useAuth();
 
   const handleMenuClick = (path) => {
     navigate(path);

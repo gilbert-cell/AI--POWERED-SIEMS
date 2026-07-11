@@ -1,357 +1,104 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
-import {
-  Box,
-  Container,
-  Grid,
-  Card,
-  CardContent,
-  Typography,
-  CircularProgress,
-  Alert,
-  IconButton,
-  Tooltip,
-  Select,
-  MenuItem,
-  FormControl,
-  InputLabel,
-} from '@mui/material';
+import React from 'react';
+import { Box, Container, Typography, CircularProgress, Alert, FormControl, InputLabel, Select, MenuItem, IconButton, Tooltip, Grid, Card, CardContent, LinearProgress } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
-import {
-  LineChart,
-  Line,
-  PieChart,
-  Pie,
-  Cell,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip as RechartsTooltip,
-  Legend,
-  ResponsiveContainer,
-} from 'recharts';
-import { dashboardService } from '../services/api';
+import { useNavigate } from 'react-router-dom';
+import { useDashboard } from '../components/Dashboard/useDashboard';
+import StatsCards from '../components/Dashboard/StatsCards';
+import LiveFeed from '../components/Dashboard/LiveFeed';
+import SourceBreakdown from '../components/Dashboard/SourceBreakdown';
+
+const SEVERITY_CONFIG = [
+  { key: 'critical',      label: 'Critical',      color: '#d32f2f', bg: '#ffebee' },
+  { key: 'high',          label: 'High',          color: '#f57c00', bg: '#fff3e0' },
+  { key: 'medium',        label: 'Medium',        color: '#f9a825', bg: '#fffde7' },
+  { key: 'low',           label: 'Low',           color: '#388e3c', bg: '#e8f5e9' },
+  { key: 'informational', label: 'Informational', color: '#1565c0', bg: '#e3f2fd' },
+];
+
+const AlertSeverityCard = ({ stats }) => {
+  const counts = stats?.severity_counts ?? {};
+  const total  = Object.values(counts).reduce((s, v) => s + v, 0);
+  const navigate = useNavigate();
+  return (
+    <Card sx={{ mb: 4, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(15,23,42,0.06)' }}>
+      <CardContent sx={{ p: 3 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
+          <Typography sx={{ fontWeight: 900, color: '#1a237e', fontSize: 20 }}>Alert Severity</Typography>
+          <Typography sx={{ fontSize: 12, color: '#94a3b8' }}>Click any card to filter logs</Typography>
+        </Box>
+        <Grid container spacing={2}>
+          {SEVERITY_CONFIG.map(({ key, label, color, bg }) => {
+            const count = counts[key] ?? 0;
+            const pct   = total > 0 ? Math.round(count / total * 100) : 0;
+            return (
+              <Grid item xs={12} sm={6} md={12/5} key={key}>
+                <Box
+                  onClick={() => navigate(`/logs?severity=${key}`)}
+                  sx={{
+                    backgroundColor: bg, borderRadius: 2, p: 1.5,
+                    border: `1px solid ${color}22`, cursor: 'pointer',
+                    transition: 'all .15s',
+                    '&:hover': { boxShadow: `0 0 0 2px ${color}`, transform: 'translateY(-2px)' },
+                  }}
+                >
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
+                    <Typography sx={{ fontWeight: 700, color, fontSize: 16 }}>● {label}</Typography>
+                    <Typography sx={{ fontWeight: 900, color, fontSize: 26 }}>{count.toLocaleString()}</Typography>
+                  </Box>
+                  <LinearProgress variant="determinate" value={pct}
+                    sx={{ height: 6, borderRadius: 3, backgroundColor: `${color}22`,
+                      '& .MuiLinearProgress-bar': { backgroundColor: color, borderRadius: 3 } }} />
+                  <Typography sx={{ fontSize: 13, color: '#64748b', mt: 0.5 }}>{pct}% of total</Typography>
+                </Box>
+              </Grid>
+            );
+          })}
+        </Grid>
+      </CardContent>
+    </Card>
+  );
+};
+
+const TIME_OPTIONS = [
+  { value: 'live', label: '● Live', live: true },
+  { value: '30min', label: 'Last 30 Minutes' },
+  { value: '1h', label: 'Last 1 Hour' },
+  { value: '24h', label: 'Last 24 Hours' },
+  { value: '7d', label: 'Last 7 Days' },
+];
 
 const Dashboard = () => {
-  const [stats, setStats] = useState(null);
-  const [trends, setTrends] = useState([]);
-  const [topAlerts, setTopAlerts] = useState([]);
-  const [health, setHealth] = useState(null);
-  const [sourceStats, setSourceStats] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [isLive, setIsLive] = useState(false);
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [timeRange, setTimeRange] = useState('live');
-  const liveRef = useRef(null);
+  const { stats, trends, topAlerts, health, sourceStats, loading, error, isLive, lastUpdated, timeRange, fetchData, handleTimeRange } = useDashboard();
 
-  const navigate = useNavigate();
-
-  const fetchDashboardData = async () => {
-    try {
-      setLoading(true);
-      const [statsRes, sourceStatsRes, trendsRes, topAlertsRes, healthRes] = await Promise.all([
-        dashboardService.getStats(),
-        dashboardService.getSourceStats(),
-        dashboardService.getAlertTrends(30),
-        dashboardService.getTopAlerts(10),
-        dashboardService.getSystemHealth(),
-      ]);
-
-      setStats(statsRes.data);
-      setSourceStats(sourceStatsRes.data);
-      // backend returns { trends: [...] }
-      setTrends(trendsRes.data?.trends ?? []);
-      // backend returns { top_alerts: [...] }
-      setTopAlerts(topAlertsRes.data?.top_alerts ?? []);
-      setHealth(healthRes.data);
-      setLastUpdated(new Date());
-      setError(null);
-    } catch (err) {
-      setError('Failed to load dashboard data');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleTimeRange = (range) => {
-    if (liveRef.current) { clearInterval(liveRef.current); liveRef.current = null; }
-    setTimeRange(range);
-    setIsLive(range === 'live');
-    if (range === 'live') {
-      liveRef.current = setInterval(fetchDashboardData, 20000);
-    }
-  };
-
-  useEffect(() => {
-    fetchDashboardData();
-    // Start live by default
-    liveRef.current = setInterval(fetchDashboardData, 20000);
-    setIsLive(true);
-    return () => { if (liveRef.current) clearInterval(liveRef.current); };
-  }, []);
-
-  if (loading) {
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
-        <CircularProgress />
-      </Box>
-    );
-  }
+  if (loading) return <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}><CircularProgress /></Box>;
 
   return (
     <Container maxWidth="xl" sx={{ py: { xs: 2, sm: 3, md: 4 }, px: { xs: 2, sm: 3 } }}>
-      <Box
-        sx={{
-          display: 'flex',
-          alignItems: { xs: 'flex-start', sm: 'center' },
-          justifyContent: 'space-between',
-          mb: { xs: 2, sm: 3 },
-          flexDirection: { xs: 'column', sm: 'row' },
-          gap: { xs: 1.5, sm: 2 },
-        }}
-      >
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
-          <Typography
-            variant="h4"
-            sx={{
-              fontWeight: 'bold',
-              color: '#1a237e',
-              fontSize: { xs: '2rem', sm: '2.125rem' },
-              lineHeight: 1.15,
-            }}
-          >
-            Dashboard
+      <Box sx={{ display: 'flex', alignItems: { xs: 'flex-start', sm: 'center' }, justifyContent: 'space-between', mb: { xs: 2, sm: 3 }, flexDirection: { xs: 'column', sm: 'row' }, gap: { xs: 1.5, sm: 2 } }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <Typography variant="h4" sx={{ fontWeight: 'bold', color: '#1a237e', fontSize: { xs: '2rem', sm: '2.125rem' } }}>Dashboard</Typography>
+          <Typography sx={{ fontSize: 13, fontWeight: 700, color: timeRange === 'live' ? '#b71c1c' : '#1a237e', backgroundColor: timeRange === 'live' ? '#ffebee' : '#e8eaf6', px: 1.5, py: 0.4, borderRadius: 2 }}>
+            {TIME_OPTIONS.find(o => o.value === timeRange)?.label}
           </Typography>
-          {isLive && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, backgroundColor: '#ffebee', px: 1.5, py: 0.5, borderRadius: 2 }}>
-              <Box sx={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#d32f2f', animation: 'pulse 1s infinite', '@keyframes pulse': { '0%,100%': { opacity: 1 }, '50%': { opacity: 0.2 } } }} />
-              <Typography variant="caption" sx={{ color: '#d32f2f', fontWeight: 'bold' }}>LIVE</Typography>
-              {lastUpdated && <Typography variant="caption" sx={{ color: '#999', ml: 0.5 }}>· {lastUpdated.toLocaleTimeString()}</Typography>}
-            </Box>
-          )}
         </Box>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', width: { xs: '100%', sm: 'auto' } }}>
           <FormControl size="small" sx={{ minWidth: { xs: 0, sm: 150 }, flex: { xs: 1, sm: 'initial' } }}>
             <InputLabel sx={{ color: '#1a237e' }}>Time Range</InputLabel>
-            <Select value={timeRange} label="Time Range"
-              onChange={(e) => handleTimeRange(e.target.value)}
+            <Select value={timeRange} label="Time Range" onChange={(e) => handleTimeRange(e.target.value)}
               sx={{ color: '#1a237e', '& .MuiOutlinedInput-notchedOutline': { borderColor: '#1a237e' } }}>
-              <MenuItem value="live"><span style={{ color: '#b71c1c', fontWeight: 'bold' }}>● Live</span></MenuItem>
-              <MenuItem value="1h">1 Hour</MenuItem>
-              <MenuItem value="24h">24 Hours</MenuItem>
-              <MenuItem value="7d">7 Days</MenuItem>
+              {TIME_OPTIONS.map(({ value, label, live }) => (
+                <MenuItem key={value} value={value}>{live ? <span style={{ color: '#b71c1c', fontWeight: 'bold' }}>{label}</span> : label}</MenuItem>
+              ))}
             </Select>
           </FormControl>
-          <Tooltip title="Refresh now">
-            <IconButton onClick={fetchDashboardData} sx={{ border: '1px solid #ddd', flexShrink: 0 }}>
-              <RefreshIcon />
-            </IconButton>
-          </Tooltip>
+          <Tooltip title="Refresh now"><IconButton onClick={fetchData} sx={{ border: '1px solid #ddd', flexShrink: 0 }}><RefreshIcon /></IconButton></Tooltip>
         </Box>
       </Box>
 
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-
-      {/* Stats Cards */}
-      <Grid container spacing={3} sx={{ mb: 4 }}>
-        <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ backgroundColor: '#e3f2fd' }}>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom>
-                Total Alerts
-              </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 'bold' }}>
-                {stats?.total_alerts || 0}
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-
-        <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ backgroundColor: '#fff3e0' }}>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom>
-                Critical Alerts
-              </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 'bold', color: '#d32f2f' }}>
-                {stats?.critical_alerts || 0}
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-
-        <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ backgroundColor: '#f3e5f5' }}>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom>
-                False Positives
-              </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 'bold', color: '#7b1fa2' }}>
-                {stats?.false_positives || 0}
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-
-        <Grid item xs={12} sm={6} md={3}>
-          <Card sx={{ backgroundColor: '#e8f5e9' }}>
-            <CardContent>
-              <Typography color="textSecondary" gutterBottom>
-                Detection Rate
-              </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 'bold', color: '#388e3c' }}>
-                {stats?.detection_rate || 0}%
-              </Typography>
-            </CardContent>
-          </Card>
-        </Grid>
-      </Grid>
-
-      {/* Source Breakdown — shows all real sources from DB */}
-      <Grid container spacing={3} sx={{ mb: 4 }}>
-        {Object.keys(sourceStats?.source_counts ?? {}).length > 0
-          ? Object.entries(sourceStats.source_counts).map(([source, count]) => (
-            <Grid item xs={12} sm={6} md={4} key={source}>
-              <Card sx={{ backgroundColor: '#f5f5f5', cursor: 'pointer', '&:hover': { boxShadow: 4, backgroundColor: '#e3f2fd' } }}
-                onClick={() => navigate(`/logs/${source}`)}
-              >
-                <CardContent>
-                  <Typography color="textSecondary" gutterBottom sx={{ textTransform: 'uppercase' }}>
-                    {source} logs
-                  </Typography>
-                  <Typography variant="h5" sx={{ fontWeight: 'bold' }}>{count}</Typography>
-                  <Typography variant="body2" color="textSecondary">
-                    False positives: {sourceStats?.false_positive_counts?.[source] ?? 0}
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-          ))
-          : (
-            <Grid item xs={12}>
-              <Card sx={{ backgroundColor: '#f8fafc' }}>
-                <CardContent>
-                  <Typography variant="body1" sx={{ fontWeight: 600, color: '#1a237e', mb: 0.5 }}>
-                    No source metrics available
-                  </Typography>
-                  <Typography variant="body2" color="textSecondary">
-                    Source breakdown will appear here once the backend returns aggregated source counts.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-          )
-        }
-      </Grid>
-
-      {/* Charts */}
-      <Grid container spacing={3}>
-        {/* Alert Trends */}
-        <Grid item xs={12} md={6}>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" sx={{ mb: 2, fontWeight: 'bold' }}>
-                Alert Trends (Last 30 Days)
-              </Typography>
-              <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={trends || []}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="date" stroke="#666" />
-                  <YAxis stroke="#666" />
-                  <RechartsTooltip />
-                  <Legend />
-                  <Line type="monotone" dataKey="alerts" stroke="#1a237e" strokeWidth={2} />
-                  <Line type="monotone" dataKey="resolved" stroke="#388e3c" strokeWidth={2} />
-                </LineChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-        </Grid>
-
-        {/* Top Alert Types */}
-        <Grid item xs={12} md={6}>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" sx={{ mb: 2, fontWeight: 'bold' }}>
-                Top Alert Types
-              </Typography>
-              <ResponsiveContainer width="100%" height={300}>
-                <PieChart>
-                  <Pie
-                    data={topAlerts || []}
-                    dataKey="count"
-                    nameKey="alert_type"
-                    cx="50%"
-                    cy="50%"
-                    outerRadius={80}
-                    label
-                  >
-                    {(topAlerts || []).map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={['#1a237e', '#d32f2f', '#f57c00', '#388e3c', '#7b1fa2'][index % 5]} />
-                    ))}
-                  </Pie>
-                  <RechartsTooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-        </Grid>
-
-        {/* System Health */}
-        <Grid item xs={12}>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" sx={{ mb: 2, fontWeight: 'bold' }}>
-                System Health Status
-              </Typography>
-              <Grid container spacing={2}>
-                <Grid item xs={12} sm={6} md={3}>
-                  <Box sx={{ p: 2, backgroundColor: '#e8f5e9', borderRadius: 1 }}>
-                    <Typography variant="body2" color="textSecondary">
-                      API Status
-                    </Typography>
-                    <Typography variant="h6" sx={{ color: '#388e3c', fontWeight: 'bold' }}>
-                      {health?.api_status || 'Unknown'}
-                    </Typography>
-                  </Box>
-                </Grid>
-                <Grid item xs={12} sm={6} md={3}>
-                  <Box sx={{ p: 2, backgroundColor: '#e3f2fd', borderRadius: 1 }}>
-                    <Typography variant="body2" color="textSecondary">
-                      Database
-                    </Typography>
-                    <Typography variant="h6" sx={{ color: '#1a237e', fontWeight: 'bold' }}>
-                      {health?.database_status || 'Unknown'}
-                    </Typography>
-                  </Box>
-                </Grid>
-                <Grid item xs={12} sm={6} md={3}>
-                  <Box sx={{ p: 2, backgroundColor: '#f3e5f5', borderRadius: 1 }}>
-                    <Typography variant="body2" color="textSecondary">
-                      AI Models
-                    </Typography>
-                    <Typography variant="h6" sx={{ color: '#7b1fa2', fontWeight: 'bold' }}>
-                      {health?.ai_models_status || 'Unknown'}
-                    </Typography>
-                  </Box>
-                </Grid>
-                <Grid item xs={12} sm={6} md={3}>
-                  <Box sx={{ p: 2, backgroundColor: '#fff3e0', borderRadius: 1 }}>
-                    <Typography variant="body2" color="textSecondary">
-                      CPU Usage
-                    </Typography>
-                    <Typography variant="h6" sx={{ color: '#f57c00', fontWeight: 'bold' }}>
-                      {health?.cpu_usage || '0'}%
-                    </Typography>
-                  </Box>
-                </Grid>
-              </Grid>
-            </CardContent>
-          </Card>
-        </Grid>
-      </Grid>
+      <StatsCards stats={stats} />
+      <AlertSeverityCard stats={stats} />
+      <LiveFeed limit={25} pollInterval={3000} />
     </Container>
   );
 };

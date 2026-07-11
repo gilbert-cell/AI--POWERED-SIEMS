@@ -24,33 +24,13 @@ import {
   KeyboardArrowDown as ArrowDownIcon,
   ShieldOutlined as ShieldIcon,
 } from '@mui/icons-material';
-import { getStoredRole, roleDefinitions, ROLE_CHANGE_EVENT } from '../../utils/rbac';
-import { AUTH_CHANGE_EVENT, getCurrentUser } from '../../utils/auth';
+import { DEFAULT_ROLE, roleDefinitions } from '../../utils/rbac';
+import { useAuth } from '../../contexts/AuthContext';
 
 const Navbar = ({ onLogout, onMenuClick }) => {
   const navigate = useNavigate();
   const [anchorEl, setAnchorEl] = React.useState(null);
-  const [currentRole, setCurrentRole] = React.useState(getStoredRole());
-  const [currentUser, setCurrentUser] = React.useState(getCurrentUser());
-
-  React.useEffect(() => {
-    const handleRoleChange = (event) => {
-      setCurrentRole(event.detail || getStoredRole());
-    };
-    const handleAuthChange = () => {
-      setCurrentUser(getCurrentUser());
-    };
-
-    window.addEventListener(ROLE_CHANGE_EVENT, handleRoleChange);
-    window.addEventListener(AUTH_CHANGE_EVENT, handleAuthChange);
-    window.addEventListener('storage', handleAuthChange);
-
-    return () => {
-      window.removeEventListener(ROLE_CHANGE_EVENT, handleRoleChange);
-      window.removeEventListener(AUTH_CHANGE_EVENT, handleAuthChange);
-      window.removeEventListener('storage', handleAuthChange);
-    };
-  }, []);
+  const { currentRole, currentUser } = useAuth();
 
   const handleMenuOpen = (event) => {
     setAnchorEl(event.currentTarget);
@@ -92,7 +72,7 @@ const Navbar = ({ onLogout, onMenuClick }) => {
     .join('')
     .slice(0, 2)
     .toUpperCase();
-  const roleLabel = roleDefinitions[currentRole]?.label || currentRole || 'Security Administrator';
+  const roleLabel = roleDefinitions[currentRole]?.label || currentRole || DEFAULT_ROLE;
 
   return (
     <AppBar

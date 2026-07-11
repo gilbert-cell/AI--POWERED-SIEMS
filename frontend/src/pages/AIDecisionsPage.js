@@ -1,468 +1,457 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
-  Box, Container, Card, CardContent, Typography, Grid,
-  Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  Button, CircularProgress, Chip, Dialog, DialogTitle, DialogContent,
-  DialogActions, Slider, Alert, Tabs, Tab,
+  Box, Container, Typography, Grid, Card, CardContent, Chip,
+  CircularProgress, LinearProgress, Divider, Alert, Tabs, Tab,
+  Table, TableBody, TableCell, TableHead, TableRow, TableContainer,
+  Button, Tooltip,
 } from '@mui/material';
-import { Refresh as RefreshIcon, Edit as EditIcon, AddCircleOutline as AddRuleIcon } from '@mui/icons-material';
-import { aiService, rulesService } from '../services/api';
-import { toast } from 'react-toastify';
+import {
+  BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip as RTooltip, ResponsiveContainer, Cell,
+} from 'recharts';
+import {
+  Security as SecurityIcon,
+  BugReport as ThreatIcon,
+  Timeline as TimelineIcon,
+  TrendingUp as RiskIcon,
+  Lightbulb as RecoIcon,
+  CheckCircle as CheckIcon,
+  Warning as WarnIcon,
+  Error as ErrorIcon,
+  Refresh as RefreshIcon,
+  SmartToy as AIIcon,
+} from '@mui/icons-material';
+import { aiService } from '../services/api';
 
-const ACTION_COLORS = {
-  BLOCK: '#d32f2f', INVESTIGATE: '#f57c00', MONITOR: '#1565c0',
-  ESCALATE: '#6a1b9a', QUARANTINE: '#880e4f',
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const SEV_COLOR = { critical: '#d32f2f', high: '#e65100', medium: '#f9a825', low: '#388e3c' };
+const SEV_BG    = { critical: '#ffebee', high: '#fff3e0', medium: '#fffde7', low:  '#e8f5e9' };
+const PRIORITY_ICON = {
+  critical: <ErrorIcon sx={{ fontSize: 18, color: '#d32f2f' }} />,
+  high:     <WarnIcon  sx={{ fontSize: 18, color: '#e65100' }} />,
+  medium:   <WarnIcon  sx={{ fontSize: 18, color: '#f9a825' }} />,
+  low:      <CheckIcon sx={{ fontSize: 18, color: '#388e3c' }} />,
 };
 
-const AIDecisionsPage = () => {
-  const [activeTab, setActiveTab] = useState(0);
-  const [decisions, setDecisions] = useState([]);
-  const [models, setModels] = useState([]);
-  const [accuracy, setAccuracy] = useState(null);
-  const [lastUpdated, setLastUpdated] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [editModelOpen, setEditModelOpen] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(null);
-  const [weights, setWeights] = useState({});
-  const [advancedData, setAdvancedData] = useState(null);
-  const [advancedLoading, setAdvancedLoading] = useState(false);
-
-  const fetchDecisions = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await aiService.getDecisions();
-      setDecisions(response.data.results || response.data);
-    } catch (error) {
-      toast.error('Failed to fetch AI decisions');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const fetchModels = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await aiService.getModels();
-      setModels(response.data.results || response.data);
-    } catch (error) {
-      toast.error('Failed to fetch AI models');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const fetchAccuracy = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await aiService.getAccuracy();
-      setAccuracy(response.data);
-      setLastUpdated(new Date().toLocaleTimeString());
-    } catch (error) {
-      toast.error('Failed to fetch accuracy metrics');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const fetchAdvanced = useCallback(async (showSpinner = false) => {
-    try {
-      if (showSpinner) setAdvancedLoading(true);
-      const response = await aiService.getAdvancedDecisions();
-      setAdvancedData(response.data);
-    } catch (error) {
-      toast.error('Failed to fetch advanced decisions');
-    } finally {
-      setAdvancedLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (activeTab === 0) {
-      fetchDecisions();
-    } else if (activeTab === 1) {
-      fetchAdvanced(true);
-      const interval = setInterval(() => fetchAdvanced(false), 20000);
-      return () => clearInterval(interval);
-    } else if (activeTab === 2) {
-      fetchModels();
-    } else {
-      fetchAccuracy();
-      const interval = setInterval(fetchAccuracy, 20000);
-      return () => clearInterval(interval);
-    }
-  }, [activeTab, fetchAccuracy, fetchAdvanced, fetchDecisions, fetchModels]);
-
-  useEffect(() => { fetchAccuracy(); }, [fetchAccuracy]);
-
-  const handleEditModel = (model) => {
-    setSelectedModel(model);
-    setWeights(model.weights || {});
-    setEditModelOpen(true);
-  };
-
-  const handleSaveWeights = async () => {
-    try {
-      await aiService.updateModelWeights(selectedModel.id, { weights });
-      toast.success('Model weights updated successfully');
-      setEditModelOpen(false);
-      fetchModels();
-    } catch (error) {
-      toast.error('Failed to update model weights');
-    }
-  };
-
-  const handleCreateRule = async (attackType, source, score) => {
-    try {
-      const res = await rulesService.createFromDecision({ attack_type: attackType, source, score });
-      if (res.data.status === 'exists') {
-        toast.info(`Rule already exists: ${res.data.rule.name}`);
-      } else {
-        toast.success(`Rule created: ${res.data.rule.name}`);
-      }
-    } catch {
-      toast.error('Failed to create rule');
-    }
-  };
-
-  // ── Tab 0: AI Decisions ──────────────────────────────────────────────────
-  const renderDecisionsTab = () => (
-    <Box>
-      <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}>
-        <Button startIcon={<RefreshIcon />} onClick={fetchDecisions} sx={{ color: '#1a237e' }}>
-          Refresh
-        </Button>
-      </Box>
-      <Card>
-        <CardContent>
-          {loading ? (
-            <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}><CircularProgress /></Box>
-          ) : (
-            <TableContainer>
-              <Table>
-                <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
-                  <TableRow>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Timestamp</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Event</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Source</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Score</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Decision</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Rule</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {decisions.length > 0 ? decisions.map((d) => (
-                    <TableRow key={d.id} hover>
-                      <TableCell>{new Date(d.timestamp).toLocaleString()}</TableCell>
-                      <TableCell sx={{ maxWidth: 350, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {d.event_description}
-                      </TableCell>
-                      <TableCell>
-                        <Chip label={d.source || '—'} size="small" variant="outlined"
-                          sx={{ borderColor: '#1a237e', color: '#1a237e' }} />
-                      </TableCell>
-                      <TableCell>
-                        <Chip
-                          label={d.score != null ? d.score.toFixed(2) : (d.confidence / 100).toFixed(2)}
-                          size="small"
-                          sx={{
-                            backgroundColor: d.score >= 0.9 ? '#d32f2f' : d.score >= 0.75 ? '#f57c00' : d.score > 0 ? '#388e3c' : '#9e9e9e',
-                            color: 'white', fontWeight: 'bold',
-                          }}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <Chip
-                          label={d.secondary_decision || d.decision}
-                          color={d.decision === 'threat' ? 'error' : 'success'}
-                          size="small" sx={{ textTransform: 'uppercase' }}
-                        />
-                      </TableCell>
-                      <TableCell>
-                        <Button size="small" startIcon={<AddRuleIcon />}
-                          onClick={() => handleCreateRule(d.attack_type || d.secondary_decision, d.source, d.score ?? d.confidence / 100)}
-                          sx={{ color: '#1a237e', fontSize: 11, whiteSpace: 'nowrap' }}>
-                          → Rule
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  )) : (
-                    <TableRow>
-                      <TableCell colSpan={5} sx={{ textAlign: 'center', py: 3 }}>No AI decisions available</TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          )}
-        </CardContent>
-      </Card>
-    </Box>
-  );
-
-  // ── Tab 1: Advanced AI Decision ──────────────────────────────────────────
-  const renderAdvancedTab = () => (
-    <Box>
-      <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}>
-        <Button startIcon={<RefreshIcon />} onClick={() => fetchAdvanced(true)} sx={{ color: '#1a237e' }}>
-          Refresh
-        </Button>
-      </Box>
-
-      <Card sx={{ mb: 3 }}>
-        <CardContent>
-          {advancedLoading ? (
-            <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}><CircularProgress /></Box>
-          ) : (
-            <TableContainer>
-              <Table>
-                <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
-                  <TableRow>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Timestamp</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Type of Attack</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Action</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Remediation</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Rule</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {advancedData?.results?.length > 0 ? advancedData.results.map((row) => (
-                    <TableRow key={row.id} hover>
-                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{new Date(row.timestamp).toLocaleString()}</TableCell>
-                      <TableCell>
-                        <Chip label={row.attack_type} size="small"
-                          sx={{ backgroundColor: '#e3f2fd', color: '#1a237e', fontWeight: 'bold' }} />
-                      </TableCell>
-                      <TableCell>
-                        <Chip label={row.action} size="small"
-                          sx={{ backgroundColor: ACTION_COLORS[row.action] || '#666', color: 'white', fontWeight: 'bold' }} />
-                      </TableCell>
-                      <TableCell sx={{ fontSize: 12, color: '#444' }}>{row.remediation}</TableCell>
-                      <TableCell>
-                        <Button size="small" startIcon={<AddRuleIcon />}
-                          onClick={() => handleCreateRule(row.attack_type, row.source, row.score)}
-                          sx={{ color: '#1a237e', fontSize: 11, whiteSpace: 'nowrap' }}>
-                          → Rule
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  )) : (
-                    <TableRow>
-                      <TableCell colSpan={4} sx={{ textAlign: 'center', py: 3 }}>No advanced decisions available</TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Attack Count Summary — bottom centre */}
-      {advancedData?.attack_counts && (
-        <Box sx={{ textAlign: 'center', py: 2 }}>
-          <Typography variant="subtitle1" sx={{ fontWeight: 'bold', color: '#1a237e', mb: 1.5 }}>
-            Total Attacks by Type (Live)
-          </Typography>
-          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, justifyContent: 'center', mb: 1 }}>
-            {Object.entries(advancedData.attack_counts).map(([type, count]) => (
-              <Chip
-                key={type}
-                label={`${type} = ${count}`}
-                sx={{ backgroundColor: '#1a237e', color: 'white', fontWeight: 'bold', fontSize: 13, px: 1 }}
-              />
-            ))}
-          </Box>
-          <Typography variant="caption" sx={{ color: '#888' }}>
-            Total: {advancedData.total} events analyzed
-          </Typography>
+const RiskGauge = ({ score, level }) => {
+  const pct   = Math.round(score * 100);
+  const color = SEV_COLOR[level] || '#1976d2';
+  return (
+    <Box sx={{ textAlign: 'center', py: 1 }}>
+      <Box sx={{ position: 'relative', display: 'inline-flex' }}>
+        <CircularProgress variant="determinate" value={pct} size={120}
+          thickness={6} sx={{ color }} />
+        <Box sx={{ position: 'absolute', inset: 0, display: 'flex',
+          flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+          <Typography sx={{ fontWeight: 900, fontSize: 26, color }}>{pct}</Typography>
+          <Typography sx={{ fontSize: 10, color: '#64748b', textTransform: 'uppercase' }}>risk</Typography>
         </Box>
-      )}
+      </Box>
+      <Chip label={level.toUpperCase()} size="small"
+        sx={{ mt: 1, backgroundColor: color, color: '#fff', fontWeight: 800, fontSize: 12 }} />
     </Box>
   );
+};
 
-  // ── Tab 2: Models & Tuning ───────────────────────────────────────────────
-  const renderModelsTab = () => (
-    <Box>
-      <Card>
-        <CardContent>
-          {loading ? (
-            <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}><CircularProgress /></Box>
+const StatBox = ({ label, value, color = '#1a237e', bg = '#e8eaf6', icon }) => (
+  <Box sx={{ flex: 1, p: 2, borderRadius: 2, backgroundColor: bg, textAlign: 'center', minWidth: 80 }}>
+    {icon && <Box sx={{ color, mb: 0.5 }}>{icon}</Box>}
+    <Typography sx={{ fontWeight: 900, fontSize: 22, color, lineHeight: 1 }}>{value}</Typography>
+    <Typography sx={{ fontSize: 13, color: '#64748b', mt: 0.5 }}>{label}</Typography>
+  </Box>
+);
+
+// ── Tab panels ────────────────────────────────────────────────────────────────
+
+const ThreatClassification = ({ data }) => (
+  <Grid container spacing={3}>
+    <Grid item xs={12} md={7}>
+      <Card sx={{ borderRadius: 3, boxShadow: '0 2px 12px rgba(0,0,0,0.07)' }}>
+        <CardContent sx={{ p: 3 }}>
+          <Typography sx={{ fontWeight: 800, fontSize: 18, color: '#0d1b4b', mb: 2 }}>
+            Detected Threat Classes — Last 24 h
+          </Typography>
+          {data.length === 0 ? (
+            <Alert severity="success">No threats classified in the last 24 hours.</Alert>
           ) : (
             <TableContainer>
-              <Table>
-                <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
+              <Table size="small">
+                <TableHead>
                   <TableRow>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Model Name</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Type</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Status</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Accuracy</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Last Updated</TableCell>
-                    <TableCell sx={{ fontWeight: 'bold' }}>Actions</TableCell>
+                    {['Threat Type', 'Count', 'Confidence', 'Severity', 'ML Score'].map(h => (
+                      <TableCell key={h} sx={{ fontWeight: 700, fontSize: 15, color: '#475569' }}>{h}</TableCell>
+                    ))}
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {models.length > 0 ? models.map((model) => (
-                    <TableRow key={model.id} hover>
+                  {data.map((t, i) => (
+                    <TableRow key={i} sx={{ '&:hover': { backgroundColor: '#f8faff' } }}>
+                      <TableCell sx={{ fontWeight: 700, fontSize: 15 }}>{t.type}</TableCell>
                       <TableCell>
-                        <Typography variant="body2" sx={{ fontWeight: 'bold' }}>{model.name}</Typography>
-                        <Typography variant="caption" color="textSecondary">Version: {model.version}</Typography>
-                      </TableCell>
-                      <TableCell>{model.model_type}</TableCell>
-                      <TableCell>
-                        <Chip label={model.is_active ? 'Active' : 'Inactive'}
-                          color={model.is_active ? 'success' : 'default'} size="small" />
+                        <Chip label={t.count} size="small"
+                          sx={{ backgroundColor: '#e3f2fd', color: '#1565c0', fontWeight: 700 }} />
                       </TableCell>
                       <TableCell>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                          <Box sx={{ width: 60, height: 8, backgroundColor: '#e0e0e0', borderRadius: 4, overflow: 'hidden' }}>
-                            <Box sx={{ height: '100%', width: `${model.accuracy || 0}%`, backgroundColor: model.accuracy > 80 ? '#388e3c' : '#f57c00' }} />
-                          </Box>
-                          <Typography variant="body2">{model.accuracy}%</Typography>
+                          <LinearProgress variant="determinate" value={t.confidence}
+                            sx={{ flex: 1, height: 6, borderRadius: 3,
+                              '& .MuiLinearProgress-bar': { backgroundColor: SEV_COLOR[t.severity] } }} />
+                          <Typography sx={{ fontSize: 14, fontWeight: 700, minWidth: 36 }}>
+                            {t.confidence}%
+                          </Typography>
                         </Box>
                       </TableCell>
-                      <TableCell>{new Date(model.last_updated).toLocaleString(undefined, { 
-                        year: 'numeric', 
-                        month: 'numeric', 
-                        day: 'numeric', 
-                        hour: '2-digit', 
-                        minute: '2-digit' 
-                      })}</TableCell>
                       <TableCell>
-                        <Button size="small" startIcon={<EditIcon />} onClick={() => handleEditModel(model)} sx={{ color: '#1a237e' }}>
-                          Tune
-                        </Button>
+                        <Chip label={t.severity.toUpperCase()} size="small"
+                          sx={{ backgroundColor: SEV_BG[t.severity], color: SEV_COLOR[t.severity], fontWeight: 800, fontSize: 11 }} />
+                      </TableCell>
+                      <TableCell sx={{ fontWeight: 700, color: SEV_COLOR[t.severity] }}>
+                        {t.max_score.toFixed(3)}
                       </TableCell>
                     </TableRow>
-                  )) : (
-                    <TableRow>
-                      <TableCell colSpan={6} sx={{ textAlign: 'center', py: 3 }}>No AI models available</TableCell>
-                    </TableRow>
-                  )}
+                  ))}
                 </TableBody>
               </Table>
             </TableContainer>
           )}
         </CardContent>
       </Card>
+    </Grid>
+    <Grid item xs={12} md={5}>
+      <Card sx={{ borderRadius: 3, boxShadow: '0 2px 12px rgba(0,0,0,0.07)', height: '100%' }}>
+        <CardContent sx={{ p: 3 }}>
+          <Typography sx={{ fontWeight: 800, fontSize: 18, color: '#0d1b4b', mb: 2 }}>
+            Threat Distribution
+          </Typography>
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={data.slice(0, 8)} layout="vertical" margin={{ left: 10 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis type="number" tick={{ fontSize: 14 }} />
+              <YAxis dataKey="type" type="category" width={150} tick={{ fontSize: 14 }} />
+              <RTooltip />
+              <Bar dataKey="count" radius={[0, 4, 4, 0]}>
+                {data.slice(0, 8).map((t, i) => (
+                  <Cell key={i} fill={SEV_COLOR[t.severity] || '#1976d2'} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </CardContent>
+      </Card>
+    </Grid>
+  </Grid>
+);
 
-      <Dialog open={editModelOpen} onClose={() => setEditModelOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle sx={{ backgroundColor: '#1a237e', color: 'white', fontWeight: 'bold' }}>
-          Tune Model: {selectedModel?.name}
-        </DialogTitle>
-        <DialogContent sx={{ mt: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <Alert severity="info">Adjust model weights to fine-tune detection sensitivity and accuracy.</Alert>
-          {selectedModel?.weights && Object.entries(selectedModel.weights).map(([key, value]) => (
-            <Box key={key}>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
-                <Typography variant="body2" sx={{ fontWeight: 'bold' }}>{key}</Typography>
-                <Typography variant="body2">{weights[key] || value}</Typography>
+const AnomalyTimeline = ({ timeline }) => (
+  <Card sx={{ borderRadius: 3, boxShadow: '0 2px 12px rgba(0,0,0,0.07)' }}>
+    <CardContent sx={{ p: 3 }}>
+      <Typography sx={{ fontWeight: 800, fontSize: 18, color: '#0d1b4b', mb: 1 }}>
+        Anomaly Detection Timeline — Last 24 h (Hourly)
+      </Typography>
+      <Typography sx={{ fontSize: 14, color: '#64748b', mb: 3 }}>
+        Real-time anomaly count and average ML score per hour. Spikes indicate attack bursts.
+      </Typography>
+      <ResponsiveContainer width="100%" height={280}>
+        <LineChart data={timeline} margin={{ right: 20 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+          <XAxis dataKey="hour" tick={{ fontSize: 14 }} interval={2} />
+          <YAxis yAxisId="left" tick={{ fontSize: 14 }} />
+          <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 14 }} domain={[0, 1]} />
+          <RTooltip />
+          <Line yAxisId="left" type="monotone" dataKey="anomalies" stroke="#d32f2f"
+            strokeWidth={2} dot={false} name="Anomalies" />
+          <Line yAxisId="left" type="monotone" dataKey="total_logs" stroke="#1976d2"
+            strokeWidth={1.5} dot={false} strokeDasharray="4 2" name="Total Logs" />
+          <Line yAxisId="right" type="monotone" dataKey="avg_score" stroke="#f57c00"
+            strokeWidth={2} dot={false} name="Avg ML Score" />
+        </LineChart>
+      </ResponsiveContainer>
+      <Box sx={{ display: 'flex', gap: 3, mt: 1, justifyContent: 'center' }}>
+        {[['#d32f2f','Anomalies'],['#1976d2','Total Logs (dashed)'],['#f57c00','Avg ML Score (right axis)']].map(([c,l]) => (
+          <Box key={l} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <Box sx={{ width: 16, height: 3, backgroundColor: c, borderRadius: 2 }} />
+            <Typography sx={{ fontSize: 14, color: '#64748b' }}>{l}</Typography>
+          </Box>
+        ))}
+      </Box>
+    </CardContent>
+  </Card>
+);
+
+const RiskPrediction = ({ risk }) => (
+  <Grid container spacing={3}>
+    <Grid item xs={12} md={4}>
+      <Card sx={{ borderRadius: 3, boxShadow: '0 2px 12px rgba(0,0,0,0.07)', height: '100%' }}>
+        <CardContent sx={{ p: 3, textAlign: 'center' }}>
+          <Typography sx={{ fontWeight: 800, fontSize: 18, color: '#0d1b4b', mb: 2 }}>
+            Current Risk Score
+          </Typography>
+          <RiskGauge score={risk.risk_score} level={risk.risk_level} />
+          <Divider sx={{ my: 2 }} />
+          <Typography sx={{ fontSize: 15, color: '#64748b' }}>
+            Trend ratio vs prior period:{' '}
+            <strong style={{ color: risk.trend_ratio > 1 ? '#d32f2f' : '#388e3c' }}>
+              {risk.trend_ratio > 1 ? '▲' : '▼'} {risk.trend_ratio}×
+            </strong>
+          </Typography>
+        </CardContent>
+      </Card>
+    </Grid>
+    <Grid item xs={12} md={4}>
+      <Card sx={{ borderRadius: 3, boxShadow: '0 2px 12px rgba(0,0,0,0.07)', height: '100%' }}>
+        <CardContent sx={{ p: 3 }}>
+          <Typography sx={{ fontWeight: 800, fontSize: 18, color: '#0d1b4b', mb: 2 }}>
+            Threat Breakdown — 24 h
+          </Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {[
+              { label: 'Critical Threats', value: risk.critical_count, color: '#d32f2f', bg: '#ffebee' },
+              { label: 'High Threats',     value: risk.high_count,     color: '#e65100', bg: '#fff3e0' },
+              { label: 'Medium Threats',   value: risk.medium_count,   color: '#f9a825', bg: '#fffde7' },
+            ].map(({ label, value, color, bg }) => (
+              <Box key={label} sx={{ display: 'flex', alignItems: 'center',
+                justifyContent: 'space-between', p: 1.5, borderRadius: 2, backgroundColor: bg }}>
+                <Typography sx={{ fontSize: 15, fontWeight: 600, color }}>{label}</Typography>
+                <Typography sx={{ fontWeight: 900, fontSize: 22, color }}>{value}</Typography>
               </Box>
-              <Slider value={weights[key] || value}
-                onChange={(e, v) => setWeights({ ...weights, [key]: v })}
-                min={0} max={1} step={0.1} />
+            ))}
+          </Box>
+        </CardContent>
+      </Card>
+    </Grid>
+    <Grid item xs={12} md={4}>
+      <Card sx={{ borderRadius: 3, boxShadow: '0 2px 12px rgba(0,0,0,0.07)', height: '100%' }}>
+        <CardContent sx={{ p: 3 }}>
+          <Typography sx={{ fontWeight: 800, fontSize: 18, color: '#0d1b4b', mb: 2 }}>
+            7-Day Anomaly Trend
+          </Typography>
+          <ResponsiveContainer width="100%" height={180}>
+            <BarChart data={risk.daily_trend}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="day" tick={{ fontSize: 14 }} />
+              <YAxis tick={{ fontSize: 14 }} />
+              <RTooltip />
+              <Bar dataKey="anomalies" radius={[4, 4, 0, 0]}>
+                {(risk.daily_trend || []).map((d, i) => (
+                  <Cell key={i} fill={d.anomalies > 10 ? '#d32f2f' : d.anomalies > 5 ? '#f57c00' : '#1976d2'} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </CardContent>
+      </Card>
+    </Grid>
+  </Grid>
+);
+
+const Recommendations = ({ recommendations, performance }) => (
+  <Grid container spacing={3}>
+    <Grid item xs={12} md={8}>
+      <Card sx={{ borderRadius: 3, boxShadow: '0 2px 12px rgba(0,0,0,0.07)' }}>
+        <CardContent sx={{ p: 3 }}>
+          <Typography sx={{ fontWeight: 800, fontSize: 18, color: '#0d1b4b', mb: 2 }}>
+            AI-Generated Security Recommendations
+          </Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {recommendations.map((r, i) => (
+              <Box key={i} sx={{
+                p: 2.5, borderRadius: 2,
+                backgroundColor: SEV_BG[r.priority] || '#f8faff',
+                borderLeft: `4px solid ${SEV_COLOR[r.priority] || '#1976d2'}`,
+              }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                  {PRIORITY_ICON[r.priority]}
+                  <Typography sx={{ fontWeight: 800, fontSize: 16,
+                    color: SEV_COLOR[r.priority] || '#1a237e' }}>
+                    {r.action}
+                  </Typography>
+                  <Chip label={r.priority.toUpperCase()} size="small"
+                    sx={{ ml: 'auto', backgroundColor: SEV_COLOR[r.priority],
+                      color: '#fff', fontWeight: 700, fontSize: 10 }} />
+                </Box>
+                <Typography sx={{ fontSize: 14, color: '#64748b' }}>
+                  <strong>Threat:</strong> {r.threat_type}
+                </Typography>
+                <Typography sx={{ fontSize: 14, color: '#475569', mt: 0.5 }}>
+                  {r.detail}
+                </Typography>
+              </Box>
+            ))}
+          </Box>
+        </CardContent>
+      </Card>
+    </Grid>
+    <Grid item xs={12} md={4}>
+      <Card sx={{ borderRadius: 3, boxShadow: '0 2px 12px rgba(0,0,0,0.07)' }}>
+        <CardContent sx={{ p: 3 }}>
+          <Typography sx={{ fontWeight: 800, fontSize: 18, color: '#0d1b4b', mb: 2 }}>
+            Model Performance — 24 h
+          </Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {[
+              { label: 'Total Logs Analyzed', value: performance.total_logs_24h, color: '#1976d2', bg: '#e3f2fd' },
+              { label: 'Anomalies Detected',  value: performance.anomalies_detected, color: '#d32f2f', bg: '#ffebee' },
+              { label: 'False Positives',     value: performance.false_positives, color: '#f57c00', bg: '#fff3e0' },
+            ].map(({ label, value, color, bg }) => (
+              <Box key={label} sx={{ display: 'flex', alignItems: 'center',
+                justifyContent: 'space-between', p: 1.5, borderRadius: 2, backgroundColor: bg }}>
+                <Typography sx={{ fontSize: 15, fontWeight: 600, color: '#475569' }}>{label}</Typography>
+                <Typography sx={{ fontWeight: 900, fontSize: 18, color }}>{value}</Typography>
+              </Box>
+            ))}
+            <Box sx={{ p: 1.5, borderRadius: 2, backgroundColor: '#e8f5e9' }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
+                <Typography sx={{ fontSize: 15, fontWeight: 600, color: '#475569' }}>
+                  ML Precision
+                </Typography>
+                <Typography sx={{ fontWeight: 900, color: '#388e3c' }}>
+                  {performance.precision}%
+                </Typography>
+              </Box>
+              <LinearProgress variant="determinate" value={performance.precision}
+                sx={{ height: 8, borderRadius: 4,
+                  '& .MuiLinearProgress-bar': { backgroundColor: '#388e3c' } }} />
             </Box>
-          ))}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setEditModelOpen(false)} sx={{ color: '#666' }}>Cancel</Button>
-          <Button onClick={handleSaveWeights} variant="contained" sx={{ backgroundColor: '#1a237e' }}>Save Weights</Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
-  );
+            <Box sx={{ p: 1.5, borderRadius: 2, backgroundColor: '#e8eaf6' }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
+                <Typography sx={{ fontSize: 15, fontWeight: 600, color: '#475569' }}>
+                  Detection Rate
+                </Typography>
+                <Typography sx={{ fontWeight: 900, color: '#1a237e' }}>
+                  {performance.detection_rate}%
+                </Typography>
+              </Box>
+              <LinearProgress variant="determinate" value={performance.detection_rate}
+                sx={{ height: 8, borderRadius: 4,
+                  '& .MuiLinearProgress-bar': { backgroundColor: '#1a237e' } }} />
+            </Box>
+          </Box>
+        </CardContent>
+      </Card>
+    </Grid>
+  </Grid>
+);
 
-  // ── Tab 3: Accuracy Metrics ──────────────────────────────────────────────
-  const renderAccuracyTab = () => (
-    <Box>
-      {loading ? (
-        <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}><CircularProgress /></Box>
-      ) : accuracy ? (
-        <Grid container spacing={3}>
-          <Grid item xs={12} md={6}>
-            <Card>
-              <CardContent>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                  <Typography variant="h6" sx={{ fontWeight: 'bold' }}>Overall Accuracy Metrics</Typography>
-                  <Box sx={{ textAlign: 'right' }}>
-                    <Typography variant="caption" color="textSecondary" display="block">
-                      {accuracy.total_logs_analyzed?.toLocaleString() ?? 0} logs analyzed
-                    </Typography>
-                    <Typography variant="caption" sx={{ color: '#388e3c', fontWeight: 'bold' }}>
-                      ⟳ Live · Updated {lastUpdated}
-                    </Typography>
-                  </Box>
-                </Box>
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {[['Overall Accuracy', accuracy.overall_accuracy], ['Precision', accuracy.precision], ['Recall', accuracy.recall], ['F1 Score', accuracy.f1_score]].map(([label, val]) => (
-                    <Box key={label}>
-                      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
-                        <Typography variant="body2" sx={{ fontWeight: 'bold' }}>{label}</Typography>
-                        <Typography variant="body2">{val}%</Typography>
-                      </Box>
-                      <Box sx={{ height: 8, backgroundColor: '#e0e0e0', borderRadius: 4, overflow: 'hidden' }}>
-                        <Box sx={{ height: '100%', width: `${val || 0}%`, backgroundColor: label === 'Overall Accuracy' ? '#388e3c' : '#1a237e', transition: 'width 0.6s ease' }} />
-                      </Box>
-                    </Box>
-                  ))}
-                </Box>
-              </CardContent>
-            </Card>
-          </Grid>
+// ── Main Page ─────────────────────────────────────────────────────────────────
+const TABS = [
+  { label: 'Threat Classification', icon: <ThreatIcon sx={{ fontSize: 17 }} /> },
+  { label: 'Anomaly Timeline',      icon: <TimelineIcon sx={{ fontSize: 17 }} /> },
+  { label: 'Risk Prediction',       icon: <RiskIcon sx={{ fontSize: 17 }} /> },
+  { label: 'Recommendations',       icon: <RecoIcon sx={{ fontSize: 17 }} /> },
+];
 
-          <Grid item xs={12} md={6}>
-            <Card>
-              <CardContent>
-                <Typography variant="h6" sx={{ mb: 2, fontWeight: 'bold' }}>Confusion Matrix</Typography>
-                <Grid container spacing={2}>
-                  {[
-                    { label: 'True Positives', value: accuracy.true_positives, bg: '#e8f5e9', color: '#388e3c' },
-                    { label: 'False Positives', value: accuracy.false_positives, bg: '#ffebee', color: '#d32f2f' },
-                    { label: 'False Negatives', value: accuracy.false_negatives, bg: '#fff3e0', color: '#f57c00' },
-                    { label: 'True Negatives', value: accuracy.true_negatives, bg: '#f3e5f5', color: '#7b1fa2' },
-                  ].map(({ label, value, bg, color }) => (
-                    <Grid item xs={6} key={label}>
-                      <Box sx={{ p: 2, backgroundColor: bg, borderRadius: 1, textAlign: 'center' }}>
-                        <Typography variant="caption" color="textSecondary">{label}</Typography>
-                        <Typography variant="h5" sx={{ color, fontWeight: 'bold', transition: 'all 0.4s' }}>
-                          {value?.toLocaleString()}
-                        </Typography>
-                      </Box>
-                    </Grid>
-                  ))}
-                </Grid>
-              </CardContent>
-            </Card>
-          </Grid>
-        </Grid>
-      ) : (
-        <Card>
-          <CardContent sx={{ textAlign: 'center', py: 3 }}>
-            <Typography color="textSecondary">No accuracy metrics available</Typography>
-          </CardContent>
-        </Card>
-      )}
-    </Box>
-  );
+const AIDecisionsPage = () => {
+  const [tab, setTab]         = useState(0);
+  const [data, setData]       = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const res = await aiService.getAnalysis();
+      setData(res.data);
+      setLastUpdated(new Date().toLocaleTimeString());
+    } catch (e) {
+      setError('Failed to load AI analysis. Ensure the backend is running.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const risk = data?.risk_prediction;
 
   return (
-    <Container maxWidth="xl" sx={{ py: 4 }}>
-      <Typography variant="h4" sx={{ mb: 3, fontWeight: 'bold', color: '#1a237e' }}>
-        AI Decisions & Model Management
-      </Typography>
+    <Container maxWidth="xl" sx={{ py: 3 }}>
 
-      <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
-        <Tabs value={activeTab} onChange={(e, value) => setActiveTab(value)}>
-          <Tab label="AI Decisions" />
-          <Tab label="Advanced AI Decision" />
-          <Tab label="Models & Tuning" />
-          <Tab label="Accuracy Metrics" />
-        </Tabs>
+      {/* ── Header ─────────────────────────────────────────────────────── */}
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        mb: 3, flexWrap: 'wrap', gap: 2 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <Box>
+            <Typography variant="h4" sx={{ fontWeight: 900, color: '#0d1b4b', lineHeight: 1 }}>
+              AI Analysis Engine
+            </Typography>
+            <Typography sx={{ fontSize: 15, color: '#64748b' }}>
+              Threat detection · Anomaly analysis · Risk prediction · Recommendations
+            </Typography>
+          </Box>
+        </Box>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          {lastUpdated && (
+            <Typography sx={{ fontSize: 12, color: '#94a3b8' }}>
+              Updated {lastUpdated}
+            </Typography>
+          )}
+          <Tooltip title="Refresh analysis">
+            <Button variant="contained" size="small" startIcon={<RefreshIcon />}
+              onClick={load} disabled={loading}
+              sx={{ bgcolor: '#1a237e', color: '#fff', fontWeight: 800, borderRadius: 2, '&:hover': { bgcolor: '#0d1b4b' } }}>
+              Refresh
+            </Button>
+          </Tooltip>
+        </Box>
       </Box>
 
-      {activeTab === 0 && renderDecisionsTab()}
-      {activeTab === 1 && renderAdvancedTab()}
-      {activeTab === 2 && renderModelsTab()}
-      {activeTab === 3 && renderAccuracyTab()}
+      {/* ── Summary KPI strip ──────────────────────────────────────────── */}
+      {data && risk && (
+        <Box sx={{ display: 'flex', gap: 2, mb: 3, flexWrap: 'wrap' }}>
+          <StatBox label="Risk Level" value={risk.risk_level.toUpperCase()}
+            color={SEV_COLOR[risk.risk_level]} bg={SEV_BG[risk.risk_level]}
+            icon={<SecurityIcon sx={{ fontSize: 18 }} />} />
+          <StatBox label="Threats 24h" value={risk.total_anomalies_24h}
+            color="#d32f2f" bg="#ffebee" icon={<ThreatIcon sx={{ fontSize: 18 }} />} />
+          <StatBox label="Critical" value={risk.critical_count}
+            color="#b71c1c" bg="#ffcdd2" />
+          <StatBox label="High" value={risk.high_count}
+            color="#e65100" bg="#fff3e0" />
+          <StatBox label="Medium" value={risk.medium_count}
+            color="#f57c00" bg="#fffde7" />
+          <StatBox label="Detection Rate"
+            value={`${data.model_performance.detection_rate}%`}
+            color="#1a237e" bg="#e8eaf6" icon={<CheckIcon sx={{ fontSize: 18 }} />} />
+          <StatBox label="ML Precision"
+            value={`${data.model_performance.precision}%`}
+            color="#388e3c" bg="#e8f5e9" />
+        </Box>
+      )}
+
+      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+      {/* ── Tabs ───────────────────────────────────────────────────────── */}
+      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{
+        mb: 3,
+        '& .MuiTab-root':       { fontWeight: 700, textTransform: 'none', fontSize: 15, minHeight: 44 },
+        '& .Mui-selected':      { color: '#1a237e' },
+        '& .MuiTabs-indicator': { backgroundColor: '#1a237e', height: 3, borderRadius: 2 },
+        borderBottom: '2px solid #e2e8f0',
+      }}>
+        {TABS.map(({ label, icon }) => (
+          <Tab key={label} label={label} icon={icon} iconPosition="start" />
+        ))}
+      </Tabs>
+
+      {loading ? (
+        <Box sx={{ display: 'flex', justifyContent: 'center', py: 8 }}>
+          <CircularProgress sx={{ color: '#1a237e' }} />
+        </Box>
+      ) : data ? (
+        <>
+          {tab === 0 && <ThreatClassification data={data.threat_classification} />}
+          {tab === 1 && <AnomalyTimeline timeline={data.anomaly_timeline} />}
+          {tab === 2 && <RiskPrediction risk={data.risk_prediction} />}
+          {tab === 3 && (
+            <Recommendations
+              recommendations={data.recommendations}
+              performance={data.model_performance}
+            />
+          )}
+        </>
+      ) : null}
     </Container>
   );
 };

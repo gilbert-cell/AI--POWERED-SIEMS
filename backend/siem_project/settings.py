@@ -40,6 +40,7 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
+    'api.middleware.LoginRateLimitMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -171,6 +172,16 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Security headers (applied in all environments)
+SECURE_BROWSER_XSS_FILTER    = True
+X_FRAME_OPTIONS               = 'DENY'
+SECURE_CONTENT_TYPE_NOSNIFF  = True
+REFERRER_POLICY               = 'strict-origin-when-cross-origin'
+
+# JWT token lifetime (seconds) — consumed by api/auth_utils.py
+JWT_ACCESS_TTL_SECONDS  = int(os.getenv('JWT_ACCESS_TTL_SECONDS',  str(60 * 60)))       # 1 h
+JWT_REFRESH_TTL_SECONDS = int(os.getenv('JWT_REFRESH_TTL_SECONDS', str(60 * 60 * 24)))  # 24 h
 
 # Security settings (production only)
 if not DEBUG:

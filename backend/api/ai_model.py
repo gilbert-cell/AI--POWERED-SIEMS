@@ -112,7 +112,11 @@ def preview_dataset(csv_filename: str = None, rows: int = 20) -> dict:
     """Preview api_log data from PostgreSQL."""
     engine = _get_engine()
     with engine.connect() as conn:
-        df = pd.read_sql(f'SELECT * FROM api_log ORDER BY id DESC LIMIT {rows}', conn)
+        df = pd.read_sql(
+            'SELECT * FROM api_log ORDER BY id DESC LIMIT :rows',
+            conn,
+            params={'rows': int(rows)},
+        )
     total = pd.read_sql('SELECT COUNT(*) AS c FROM api_log', engine).iloc[0]['c']
     return {
         'dataset': 'PostgreSQL:api_log',
@@ -170,10 +174,14 @@ def load_dataset_to_logs(csv_filename: str = "UNSW_NB15_training-set.csv", max_r
             'analysis': 'ids-system', 'normal': 'auth-service',
         }.get(raw_cat, proto if proto not in ('-', '') else 'network-monitor')
 
+        from datetime import datetime
+        ts = datetime.now().strftime('%b %d %H:%M:%S')
+        hostname = 'ubuntu-server'
         message = (
-            f"Attack Category: {attack_cat} | Protocol: {proto} | Service: {service} | "
-            f"State: {state} | Duration: {dur} | "
-            f"Packets sent: {spkts} | Bytes sent: {sbytes}"
+            f"{ts} {hostname} {source}[{spkts}]: "
+            f"proto={proto} service={service if service != '-' else 'unknown'} "
+            f"state={state} dur={dur} bytes={sbytes} "
+            f"category={attack_cat}"
         )
 
         true_label = int(row.get("label", 0))
@@ -198,6 +206,7 @@ def load_dataset_to_logs(csv_filename: str = "UNSW_NB15_training-set.csv", max_r
             duration        = dur,
             packets_sent    = spkts,
             bytes_sent      = sbytes,
+            dataset_type    = 'network',
         )
 
         # Get anomaly score based on attack category
@@ -388,6 +397,62 @@ def _record_has_if_features(record: dict) -> bool:
         'duration', 'packets_sent', 'bytes_sent',
         'dur', 'spkts', 'sbytes', 'dpkts', 'dbytes',
     ])
+
+
+def load_host_logs(max_rows: int = 500) -> dict:
+    """Generate synthetic host-based logs (process, file, login activity)."""
+    import random
+    from .models import Log, Anomaly
+    from .views import normalize_event_type, normalize_severity, normalize_attack_category
+
+    # (event_type, level, source, attack_cat, score, service, port, protocol, state, dur, pkts, byts)
+    HOST_EVENTS = [
+        ('LOGIN_SUCCESS',        'INFO',     'auth-service',    'Normal',      0.0,  'ssh',     22,   'tcp', 'CON', 0.12, 4,  320),
+        ('LOGIN_FAILED',         'WARNING',  'auth-service',    'Normal',      0.15, 'ssh',     22,   'tcp', 'REJ', 0.05, 2,  128),
+        ('BRUTE_FORCE',          'ERROR',    'auth-service',    'Brute Force', 0.85, 'ssh',     22,   'tcp', 'REJ', 0.03, 20, 1280),
+        ('PRIVILEGE_ESCALATION', 'CRITICAL', 'filesystem',      'Exploits',    0.90, 'sudo',    0,    '',    'CON', 0.01, 1,  64),
+        ('FILE_ACCESS',          'INFO',     'filesystem',      'Normal',      0.0,  'smb',     445,  'tcp', 'CON', 0.08, 6,  512),
+        ('MALWARE_ACTIVITY',     'CRITICAL', 'filesystem',      'Backdoor',    0.95, 'shell',   4444, 'tcp', 'CON', 5.0,  50, 8192),
+        ('CONFIG_CHANGE',        'WARNING',  'application',     'Normal',      0.2,  'http',    80,   'tcp', 'FIN', 0.3,  8,  1024),
+        ('WORM',                 'CRITICAL', 'network-monitor', 'Worms',       0.95, 'netbios', 139,  'tcp', 'CON', 2.5,  40, 4096),
+    ]
+    PROCESSES = ['sshd', 'nginx', 'apache2', 'python3', 'bash', 'cron', 'sudo', 'systemd', 'curl', 'wget']
+
+    loaded = tp = fp = 0
+    for _ in range(max_rows):
+        etype_raw, level, source, attack_cat, score, svc, port, proto, state, dur, pkts, byts = random.choice(HOST_EVENTS)
+        pid   = random.randint(100, 65535)
+        pname = random.choice(PROCESSES)
+        from datetime import datetime
+        ts = datetime.now().strftime('%b %d %H:%M:%S')
+        hostname = 'ubuntu-server'
+        msg = (
+            f"{ts} {hostname} {pname}[{pid}]: "
+            f"event={etype_raw} service={svc} port={port} user=root src=127.0.0.1"
+        )
+
+        etype = normalize_event_type(msg, attack_cat, level)
+        sev   = normalize_severity(msg, level, attack_cat)
+        cat   = normalize_attack_category(etype, attack_cat)
+
+        log = Log.objects.create(
+            source=source, message=msg, level=level,
+            event_type=etype, severity=sev, attack_category=cat,
+            process_name=pname, process_pid=pid,
+            service=svc, port=port if port else None, protocol=proto,
+            state=state, duration=dur, packets_sent=pkts, bytes_sent=byts,
+            dataset_type='host',
+        )
+        if score >= 0.45:
+            Anomaly.objects.create(
+                log=log, anomaly_type=attack_cat, score=score,
+                details=f'Host event: {etype_raw}', status='confirmed',
+            )
+            tp += 1
+        loaded += 1
+
+    return {'loaded_logs': loaded, 'dataset': 'host-synthetic',
+            'anomalies_created': tp, 'false_positives': fp, 'true_positives': tp}
 
 
 def score_siem_log(duration: float, packets_sent: int, bytes_sent: int) -> float | None:

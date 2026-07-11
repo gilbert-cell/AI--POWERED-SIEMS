@@ -1,11 +1,25 @@
 // This file exports TypeScript types and interfaces used throughout the frontend application.
 
 export interface Log {
-  id: string;
+  id: string | number;
   timestamp: string;
   message: string;
-  level: 'info' | 'warning' | 'error';
+  level?: 'info' | 'warning' | 'error' | string;
   source: string;
+  event_type?: string;
+  severity?: string;
+  status?: string | null;
+  status_label?: string;
+  display_status?: string;
+  false_positive?: boolean;
+  anomaly_score?: number;
+  rf_score?: number;
+  if_score?: number;
+  ml_scores?: {
+    anomaly_score?: number;
+    if_score?: number;
+    rf_score?: number;
+  };
 }
 
 export interface Rule {

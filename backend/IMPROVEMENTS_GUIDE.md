@@ -1,5 +1,65 @@
 # SIEM Improvements Guide
 
+## Part 0: Standard 5-Level Severity Scale
+
+This SIEM uses the industry-standard 5-level severity scale aligned with commercial SIEM platforms.
+
+| Level | Color | Score Range | Description | Examples |
+|-------|-------|-------------|-------------|----------|
+| 🔵 Informational | Blue | 0.00 – 0.14 | Normal activity, no threat | Login success, SSH session opened, service start, cron job |
+| 🟢 Low | Green | 0.15 – 0.44 | Minor event, monitor only | User logout, config change, USB device connected, normal process |
+| 🟡 Medium | Yellow | 0.45 – 0.74 | Suspicious, needs investigation | Failed SSH login, multiple failed logins, unexpected file access |
+| 🟠 High | Orange | 0.75 – 0.89 | Likely attack or policy violation | Port scan, brute-force, malware detected, DoS, SQL Injection, XSS |
+| 🔴 Critical | Red | 0.90 – 1.00 | Confirmed/severe attack, immediate response | Privilege escalation, ransomware, backdoor, RCE, data exfiltration |
+
+### Network Events (UNSW-NB15) Severity Mapping
+
+| Attack Category | Severity |
+|----------------|----------|
+| Normal | Informational |
+| Analysis | Medium |
+| Fuzzers | Medium |
+| Reconnaissance | Medium |
+| Generic | High |
+| DoS | High |
+| Exploits | Critical |
+| Backdoor | Critical |
+| Worms | Critical |
+| Shellcode | Critical |
+
+### Ubuntu Host Events Severity Mapping
+
+| Host Event | Severity |
+|-----------|----------|
+| Successful login | Informational |
+| SSH session opened | Informational |
+| System boot | Informational |
+| Cron job executed | Informational |
+| Service started | Informational |
+| User logout | Low |
+| Configuration change | Low |
+| USB device connected | Low |
+| Failed login | Medium |
+| Unexpected file access | Medium |
+| High memory usage | Medium |
+| Multiple failed logins (>5) | High |
+| New sudo session | High |
+| Root login | High |
+| Suspicious process | High |
+| Privilege escalation | Critical |
+| Unauthorized file modification | Critical |
+
+### Example Alerts
+
+```json
+{ "event": "User Login Success", "severity": "Informational", "status": "Open" }
+{ "event": "Failed SSH Login",   "severity": "Medium",        "status": "Open" }
+{ "event": "SSH Brute Force",    "severity": "High",          "status": "Open" }
+{ "event": "Privilege Escalation", "severity": "Critical",   "status": "Open" }
+```
+
+---
+
 ## Part 1: Improved Anomaly Detection
 
 ### What's Fixed
@@ -64,10 +124,10 @@ python3 realtime_logs.py --duration=300 --api  # 5 minutes, sending to API
 ### Expected Output
 
 ```
-[0001] 🟢 [2026-04-27 14:25:30] API:✗ | Login Success           | Low      | firewall
-[0002] 🟡 [2026-04-27 14:25:32] API:✗ | Port Scan               | Medium   | web-server
-[0003] 🔴 [2026-04-27 14:25:34] API:✗ | DDoS Attack             | High     | database
-[0004] 🔴🔴 [2026-04-27 14:25:36] API:✗ | Malware Activity        | Critical | network-monitor
+[0001] 🟢 [2026-04-27 14:25:30] API:✗ | Login Success           | Informational | auth-service
+[0002] 🟡 [2026-04-27 14:25:32] API:✗ | Failed SSH Login        | Medium        | web-server
+[0003] 🔴 [2026-04-27 14:25:34] API:✗ | Port Scan               | High          | firewall
+[0004] 🔴🔴 [2026-04-27 14:25:36] API:✗ | Backdoor Detected       | Critical      | ids-system
 ```
 
 ---

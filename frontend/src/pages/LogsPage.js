@@ -1,441 +1,128 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import {
-  Box,
-  Container,
-  Card,
-  CardContent,
-  Typography,
-  Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
-  Pagination,
-  TextField,
-  Button,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Chip,
-  CircularProgress,
-  Alert,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
-} from '@mui/material';
-import {
-  Info as InfoIcon,
-} from '@mui/icons-material';
-import { logService } from '../services/api';
+import React, { useState, useEffect } from 'react';
+import { Box, Container, Typography, Alert, Button, Chip, Paper, Stack, Tooltip } from '@mui/material';
+import { useLocation } from 'react-router-dom';
+import DownloadIcon from '@mui/icons-material/Download';
 import { toast } from 'react-toastify';
+import { useLogs } from '../components/Logs/useLogs';
+import LogFilters from '../components/Logs/LogFilters';
+import LogTable from '../components/Logs/LogTable';
+import LogDetailDialog from '../components/Logs/LogDetailDialog';
+import { logService } from '../services/api';
 
 const LogsPage = () => {
-  const [logs, setLogs] = useState([]);
-  const [duplicates, setDuplicates] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [page, setPage] = useState(1);
-  const [totalCount, setTotalCount] = useState(0);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  const {
+    logs, duplicates, loading, page, setPage, totalCount, fpCount, PAGE_SIZE,
+    searchQuery, setSearchQuery, duplicateFilter, setDuplicateFilter,
+    sourceFilter, setSourceFilter, severityFilter, setSeverityFilter,
+    statusFilter, setStatusFilter,
+    timeRange, setTimeRange, isLive,
+    handleSearch, handleRemoveDuplicate,
+  } = useLogs();
+
+  const location = useLocation();
   const [selectedLog, setSelectedLog] = useState(null);
-  const [duplicateFilter, setDuplicateFilter] = useState(false);
-  const [sourceFilter, setSourceFilter] = useState('');
-  const [severityFilter, setSeverityFilter] = useState('');
 
-  const itemsPerPage = 10;
-
-  const fetchLogs = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await logService.getLogs({
-        page,
-        page_size: itemsPerPage,
-        duplicates: duplicateFilter,
-        source: sourceFilter,
-        severity: severityFilter,
-      });
-      setLogs(response.data.results || response.data);
-      setTotalCount(response.data.count || (response.data.results || response.data).length || 0);
-    } catch (error) {
-      console.error('Failed to fetch logs:', error);
-      toast.error('Failed to fetch logs');
-    } finally {
-      setLoading(false);
-    }
-  }, [duplicateFilter, page, sourceFilter, severityFilter]);
-
-  const fetchDuplicates = useCallback(async () => {
-    try {
-      const response = await logService.getDuplicateLogs();
-      setDuplicates(response.data);
-    } catch (error) {
-      console.error('Failed to fetch duplicates:', error);
-    }
-  }, []);
-
+  // Pre-apply filters from URL e.g. /logs?status=false_positive or /logs?severity=critical
   useEffect(() => {
-    fetchLogs();
-    fetchDuplicates();
-  }, [fetchDuplicates, fetchLogs]);
+    const params = new URLSearchParams(location.search);
+    const s = params.get('status');
+    const sev = params.get('severity');
+    if (s) setStatusFilter(s);
+    if (sev) setSeverityFilter(sev.toUpperCase());
+  }, [location.search]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleSearch = async (e) => {
-    e.preventDefault();
-    if (!searchQuery.trim()) {
-      fetchLogs();
-      return;
-    }
-
+  const handleDownload = async () => {
     try {
-      setLoading(true);
-      const response = await logService.searchLogs(searchQuery, { 
-        page, 
-        page_size: itemsPerPage,
-        source: sourceFilter,
-        severity: severityFilter,
+      const res = await logService.exportLogs({
+        source: sourceFilter || undefined,
+        severity: severityFilter || undefined,
+        range: isLive ? undefined : timeRange,
       });
-      setLogs(response.data.results || response.data);
-      setTotalCount(response.data.count || (response.data.results || response.data).length || 0);
-    } catch (error) {
-      console.error('Search failed:', error);
-      toast.error('Search failed');
-    } finally {
-      setLoading(false);
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `siem-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error('Download failed');
     }
-  };
-
-  const handleRemoveDuplicate = async (logIds) => {
-    try {
-      await logService.removeDuplicate(logIds);
-      toast.success('Duplicates removed successfully');
-      fetchLogs();
-      fetchDuplicates();
-    } catch (error) {
-      console.error('Failed to remove duplicates:', error);
-      toast.error('Failed to remove duplicates');
-    }
-  };
-
-  const handleViewDetails = (log) => {
-    setSelectedLog(log);
-    setDetailsOpen(true);
-  };
-
-  const handleCloseDetails = () => {
-    setDetailsOpen(false);
-    setSelectedLog(null);
-  };
-
-  const getSeverityColor = (severity) => {
-    const colors = {
-      critical: 'error', CRITICAL: 'error',
-      high: 'warning',   HIGH: 'warning',
-      medium: 'info',    MEDIUM: 'info',
-      low: 'success',    LOW: 'success',
-    };
-    return colors[severity] || 'default';
   };
 
   return (
-    <Container maxWidth="xl" sx={{ py: 4 }}>
-      <Typography variant="h4" sx={{ mb: 3, fontWeight: 'bold', color: '#1a237e' }}>
-        Alerts & Logs Management
-      </Typography>
+    <Container maxWidth="xl" sx={{ py: { xs: 2, md: 4 } }}>
+      <Paper
+        elevation={0}
+        sx={{
+          mb: 3,
+          p: { xs: 2, md: 3 },
+          borderRadius: 2,
+          border: '1px solid #dbe5f3',
+          background: 'linear-gradient(135deg, #ffffff 0%, #eef6ff 55%, #fff7ed 100%)',
+        }}
+      >
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <Box>
+            <Typography variant="overline" sx={{ color: '#2563eb', fontWeight: 800, letterSpacing: 0 }}>
+              Security Event Center
+            </Typography>
+            <Typography variant="h4" sx={{ fontWeight: 900, color: '#0f172a', lineHeight: 1.15 }}>
+              Alerts & Logs Management
+            </Typography>
+            <Typography sx={{ mt: 1, color: '#64748b', maxWidth: 680 }}>
+              Review incoming telemetry, isolate duplicate events, and inspect AI-enriched log details.
+            </Typography>
+          </Box>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', rowGap: 1, alignItems: 'center' }}>
+            <Chip label={`${totalCount} logs`} sx={{ bgcolor: '#0f172a', color: '#fff', fontWeight: 800 }} />
+            <Chip label={`${duplicates.length} duplicates`} sx={{ bgcolor: duplicates.length ? '#fee2e2' : '#dcfce7', color: duplicates.length ? '#991b1b' : '#166534', fontWeight: 800 }} />
+            <Chip
+              label={`${fpCount} false positives`}
+              onClick={() => setStatusFilter(statusFilter === 'false_positive' ? '' : 'false_positive')}
+              sx={{ bgcolor: '#fef2f2', color: '#991b1b', fontWeight: 800, cursor: 'pointer', border: statusFilter === 'false_positive' ? '2px solid #dc2626' : '2px solid transparent' }}
+            />
+            <Tooltip title="Download all logs as CSV">
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={<DownloadIcon />}
+                onClick={handleDownload}
+                disabled={totalCount === 0}
+                sx={{ bgcolor: '#1a237e', '&:hover': { bgcolor: '#0d1b4b' }, fontWeight: 700, borderRadius: 2 }}
+              >
+                Download All CSV
+              </Button>
+            </Tooltip>
+          </Stack>
+        </Box>
+      </Paper>
 
-      {/* Duplicates Alert */}
       {duplicates.length > 0 && (
         <Alert
           severity="warning"
-          sx={{ mb: 2 }}
-          action={
-            <Button
-              size="small"
-              onClick={() => handleRemoveDuplicate(duplicates.map(d => d.id))}
-              sx={{ color: '#d32f2f' }}
-            >
-              Remove All
-            </Button>
-          }
+          sx={{ mb: 2, border: '1px solid #fed7aa', '& .MuiAlert-message': { fontWeight: 600 } }}
+          action={<Button size="small" onClick={() => handleRemoveDuplicate(duplicates.map((d) => d.id))} sx={{ color: '#9a3412', fontWeight: 800 }}>Remove All</Button>}
         >
           Found {duplicates.length} duplicate log entries. Click "Remove All" to deduplicate.
         </Alert>
       )}
 
-      {/* Search Bar */}
-      <Card sx={{ mb: 3 }}>
-        <CardContent>
-          <Box component="form" onSubmit={handleSearch} sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
-            <TextField
-              fullWidth
-              placeholder="Search logs by source, event type, or message..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              variant="outlined"
-              size="small"
-              sx={{ flex: 1, minWidth: 200 }}
-            />
-            <FormControl size="small" sx={{ minWidth: 120 }}>
-              <InputLabel>Severity</InputLabel>
-              <Select
-                value={severityFilter}
-                label="Severity"
-                onChange={(e) => setSeverityFilter(e.target.value)}
-              >
-                <MenuItem value=""><em>All</em></MenuItem>
-                <MenuItem value="critical">Critical</MenuItem>
-                <MenuItem value="high">High</MenuItem>
-                <MenuItem value="medium">Medium</MenuItem>
-                <MenuItem value="low">Low</MenuItem>
-              </Select>
-            </FormControl>
-            <FormControl size="small" sx={{ minWidth: 120 }}>
-              <InputLabel>Source</InputLabel>
-              <Select
-                value={sourceFilter}
-                label="Source"
-                onChange={(e) => setSourceFilter(e.target.value)}
-              >
-                <MenuItem value=""><em>All Sources</em></MenuItem>
-                <MenuItem value="firewall">Firewall</MenuItem>
-                <MenuItem value="ids-system">IDS System</MenuItem>
-                <MenuItem value="web-server">Web Server</MenuItem>
-                <MenuItem value="auth-service">Auth Service</MenuItem>
-                <MenuItem value="network-monitor">Network Monitor</MenuItem>
-                <MenuItem value="database">Database</MenuItem>
-                <MenuItem value="application">Application</MenuItem>
-                <MenuItem value="filesystem">Filesystem</MenuItem>
-                <MenuItem value="dns">DNS</MenuItem>
-                <MenuItem value="smtp">SMTP</MenuItem>
-                <MenuItem value="ftp">FTP</MenuItem>
-                <MenuItem value="ftp-data">FTP Data</MenuItem>
-                <MenuItem value="ssh">SSH</MenuItem>
-                <MenuItem value="http">HTTP</MenuItem>
-                <MenuItem value="snmp">SNMP</MenuItem>
-                <MenuItem value="dhcp">DHCP</MenuItem>
-                <MenuItem value="ssl">SSL</MenuItem>
-                <MenuItem value="pop3">POP3</MenuItem>
-              </Select>
-            </FormControl>
-            <Button variant="contained" type="submit" sx={{ backgroundColor: '#1a237e' }}>
-              Search
-            </Button>
-            <Button
-              variant={duplicateFilter ? 'contained' : 'outlined'}
-              onClick={() => setDuplicateFilter(!duplicateFilter)}
-              sx={{
-                backgroundColor: duplicateFilter ? '#d32f2f' : 'transparent',
-                color: duplicateFilter ? 'white' : '#d32f2f',
-                borderColor: '#d32f2f',
-              }}
-            >
-              Duplicates
-            </Button>
-          </Box>
-        </CardContent>
-      </Card>
+      <LogFilters
+        searchQuery={searchQuery} setSearchQuery={setSearchQuery}
+        severityFilter={severityFilter} setSeverityFilter={setSeverityFilter}
+        sourceFilter={sourceFilter} setSourceFilter={setSourceFilter}
+        statusFilter={statusFilter} setStatusFilter={setStatusFilter}
+        duplicateFilter={duplicateFilter} setDuplicateFilter={setDuplicateFilter}
+        timeRange={timeRange} setTimeRange={setTimeRange} isLive={isLive}
+        onSearch={handleSearch}
+      />
 
-      {/* Logs Table */}
-      <Card>
-        <CardContent>
-          {loading ? (
-            <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}>
-              <CircularProgress />
-            </Box>
-          ) : (
-            <>
-              <TableContainer>
-                <Table>
-                  <TableHead sx={{ backgroundColor: '#f5f5f5' }}>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Timestamp</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Source</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Event Type</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Severity</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Message</TableCell>
-                      <TableCell sx={{ fontWeight: 'bold' }}>Actions</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {logs.length > 0 ? (
-                      logs.map((log) => (
-                        <TableRow key={log.id} hover>
-                          <TableCell>{new Date(log.timestamp).toLocaleString()}</TableCell>
-                          <TableCell>{log.source || 'N/A'}</TableCell>
-                          <TableCell>{log.event_type || 'N/A'}</TableCell>
-                          <TableCell>
-                            <Chip
-                              label={log.severity || 'Unknown'}
-                              color={getSeverityColor(log.severity)}
-                              size="small"
-                            />
-                          </TableCell>
-                          <TableCell sx={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {log.message}
-                          </TableCell>
-                          <TableCell>
-                            <Button
-                              size="small"
-                              startIcon={<InfoIcon />}
-                              onClick={() => handleViewDetails(log)}
-                              sx={{ color: '#1a237e' }}
-                            >
-                              Details
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    ) : (
-                      <TableRow>
-                        <TableCell colSpan={6} sx={{ textAlign: 'center', py: 3 }}>
-                          No logs found
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </TableContainer>
+      <LogTable
+        logs={logs} loading={loading} page={page} totalCount={totalCount} pageSize={PAGE_SIZE}
+        onPageChange={setPage} onViewDetails={setSelectedLog}
+      />
 
-              <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
-                <Pagination
-                  count={Math.max(1, Math.ceil(totalCount / itemsPerPage))}
-                  page={page}
-                  onChange={(e, value) => setPage(value)}
-                  color="primary"
-                />
-              </Box>
-            </>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Details Dialog */}
-      <Dialog open={detailsOpen} onClose={handleCloseDetails} maxWidth="md" fullWidth>
-        <DialogTitle sx={{ backgroundColor: '#1a237e', color: 'white', fontWeight: 'bold' }}>
-          Log Details
-        </DialogTitle>
-        <DialogContent sx={{ mt: 2 }}>
-          {selectedLog && (
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-
-              {/* Row 1: Timestamp + Source */}
-              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-                <Box sx={{ flex: 1, minWidth: 180 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Timestamp</Typography>
-                  <Typography variant="body2">{new Date(selectedLog.timestamp).toLocaleString()}</Typography>
-                </Box>
-                <Box sx={{ flex: 1, minWidth: 180 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Source</Typography>
-                  <Typography variant="body2">{selectedLog.source}</Typography>
-                </Box>
-              </Box>
-
-              {/* Row 2: Event Type + Severity */}
-              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
-                <Box sx={{ flex: 1, minWidth: 180 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Event Type</Typography>
-                  <Chip label={selectedLog.event_type || '—'} size="small"
-                    sx={{ backgroundColor: '#e3f2fd', color: '#1a237e', fontWeight: 'bold', mt: 0.5 }} />
-                </Box>
-                <Box sx={{ flex: 1, minWidth: 180 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Severity</Typography>
-                  <Chip label={(selectedLog.severity || '—').toUpperCase()} size="small"
-                    color={getSeverityColor(selectedLog.severity)} sx={{ mt: 0.5, fontWeight: 'bold' }} />
-                </Box>
-              </Box>
-
-              {/* Row 3: Attack Category + Protocol */}
-              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-                <Box sx={{ flex: 1, minWidth: 180 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Attack Category</Typography>
-                  <Typography variant="body2">{selectedLog.attack_category || '—'}</Typography>
-                </Box>
-                <Box sx={{ flex: 1, minWidth: 180 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Protocol</Typography>
-                  <Typography variant="body2">{selectedLog.raw_data?.protocol || '—'}</Typography>
-                </Box>
-              </Box>
-
-              {/* Row 4: Service + State + Port */}
-              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-                <Box sx={{ flex: 1, minWidth: 120 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Service</Typography>
-                  <Typography variant="body2">{selectedLog.raw_data?.service || '—'}</Typography>
-                </Box>
-                <Box sx={{ flex: 1, minWidth: 120 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>State</Typography>
-                  <Typography variant="body2">{selectedLog.raw_data?.state || '—'}</Typography>
-                </Box>
-                <Box sx={{ flex: 1, minWidth: 120 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Port</Typography>
-                  <Typography variant="body2">{selectedLog.raw_data?.port ?? '—'}</Typography>
-                </Box>
-              </Box>
-
-              {/* Row 5: Src IP + Dst IP */}
-              <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-                <Box sx={{ flex: 1, minWidth: 180 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Source IP</Typography>
-                  <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{selectedLog.source_ip || '—'}</Typography>
-                </Box>
-                <Box sx={{ flex: 1, minWidth: 180 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Destination IP</Typography>
-                  <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>{selectedLog.destination_ip || '—'}</Typography>
-                </Box>
-              </Box>
-
-              {/* Row 6: ML Features */}
-              <Box>
-                <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e', mb: 0.5 }}>ML Features</Typography>
-                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', backgroundColor: '#f5f5f5', p: 1.5, borderRadius: 1 }}>
-                  {[['Duration', selectedLog.features?.duration], ['Packets Sent', selectedLog.features?.packets_sent], ['Bytes Sent', selectedLog.features?.bytes_sent]]
-                    .map(([label, val]) => (
-                      <Box key={label} sx={{ minWidth: 120 }}>
-                        <Typography variant="caption" color="textSecondary">{label}</Typography>
-                        <Typography variant="body2" sx={{ fontWeight: 'bold' }}>{val ?? '—'}</Typography>
-                      </Box>
-                    ))}
-                </Box>
-              </Box>
-
-              {/* Row 7: Anomaly Score + Type */}
-              {(selectedLog.anomaly_score > 0 || selectedLog.anomaly_type) && (
-                <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-                  <Box sx={{ flex: 1, minWidth: 180 }}>
-                    <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Anomaly Score</Typography>
-                    <Chip
-                      label={selectedLog.anomaly_score?.toFixed(2) ?? '0.00'} size="small"
-                      sx={{
-                        mt: 0.5, fontWeight: 'bold', color: 'white',
-                        backgroundColor: selectedLog.anomaly_score >= 0.9 ? '#d32f2f'
-                          : selectedLog.anomaly_score >= 0.75 ? '#f57c00'
-                          : selectedLog.anomaly_score >= 0.45 ? '#388e3c' : '#9e9e9e',
-                      }} />
-                  </Box>
-                  <Box sx={{ flex: 1, minWidth: 180 }}>
-                    <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Anomaly Type</Typography>
-                    <Typography variant="body2">{selectedLog.anomaly_type || 'Clean'}</Typography>
-                  </Box>
-                </Box>
-              )}
-
-              {/* Row 8: Message */}
-              <Box>
-                <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: '#1a237e' }}>Message</Typography>
-                <Typography sx={{ backgroundColor: '#f5f5f5', p: 1.5, borderRadius: 1, fontSize: '0.85rem',
-                  whiteSpace: 'pre-wrap', wordBreak: 'break-word', mt: 0.5 }}>
-                  {selectedLog.message}
-                </Typography>
-              </Box>
-
-            </Box>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={handleCloseDetails} sx={{ color: '#1a237e' }}>Close</Button>
-        </DialogActions>
-      </Dialog>
+      <LogDetailDialog log={selectedLog} open={!!selectedLog} onClose={() => setSelectedLog(null)} />
     </Container>
   );
 };

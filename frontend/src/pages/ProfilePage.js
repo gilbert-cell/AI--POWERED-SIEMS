@@ -18,26 +18,31 @@ import {
 import { getStoredRole, roleDefinitions, ROLE_CHANGE_EVENT } from '../utils/rbac';
 import { AUTH_CHANGE_EVENT, getCurrentUser } from '../utils/auth';
 import { useLocation } from 'react-router-dom';
+import { formatDateTime as formatSharedDateTime } from '../utils/helpers';
 
 // ── Permission badge colours ──────────────────────────────────────────────────
 const PERM_COLORS = {
-  'Collect Security Logs':                    { bg: '#e3f2fd', color: '#1565c0' },
-  'Explore Threats':                          { bg: '#fce4ec', color: '#c62828' },
-  'Monitor Security Events':                  { bg: '#e8f5e9', color: '#2e7d32' },
-  'Analyse Events Using AI':                  { bg: '#e8eaf6', color: '#283593' },
-  'Detect Anomalies':                         { bg: '#f3e5f5', color: '#6a1b9a' },
-  'Update AI Models':                         { bg: '#e0f7fa', color: '#00695c' },
-  'Classify Threats':                         { bg: '#fff3e0', color: '#e65100' },
-  'Review and Investigate Generated Alerts':  { bg: '#fce4ec', color: '#b71c1c' },
-  'Prioritize and Respond to Security Incidents': { bg: '#ffebee', color: '#c62828' },
-  'Configure SIEM Rules and System Parameters':   { bg: '#e8f5e9', color: '#1b5e20' },
-  'Manage Users and Roles':                   { bg: '#fff3e0', color: '#e65100' },
-  'Maintain System Performance':              { bg: '#e0f7fa', color: '#006064' },
-  'Manage Log Aggregation and Storage':       { bg: '#e3f2fd', color: '#0d47a1' },
-  'Audit Security Events and System Logs':    { bg: '#f9fbe7', color: '#558b2f' },
-  'Review Generated Security Reports':        { bg: '#e8eaf6', color: '#1a237e' },
-  'Evaluate System Effectiveness':            { bg: '#f3e5f5', color: '#4a148c' },
-  'Maintain System':                          { bg: '#e0f2f1', color: '#004d40' },
+  'Manage users and access permissions': { bg: '#fff3e0', color: '#e65100' },
+  'Configure SIEM infrastructure and integrations': { bg: '#e8f5e9', color: '#1b5e20' },
+  'Manage log aggregation, storage, and backups': { bg: '#e3f2fd', color: '#0d47a1' },
+  'Monitor system performance and availability': { bg: '#e0f7fa', color: '#006064' },
+  'Maintain server and database security': { bg: '#fce4ec', color: '#b71c1c' },
+  'Apply updates, patches, and system maintenance': { bg: '#e0f2f1', color: '#004d40' },
+  'Configure system parameters and operational settings': { bg: '#e8eaf6', color: '#283593' },
+  'Monitor security events and alerts': { bg: '#e8f5e9', color: '#2e7d32' },
+  'Analyse logs using AI and correlation rules': { bg: '#e8eaf6', color: '#283593' },
+  'Detect anomalies and suspicious activities': { bg: '#f3e5f5', color: '#6a1b9a' },
+  'Investigate and respond to security incidents': { bg: '#ffebee', color: '#c62828' },
+  'Tune SIEM rules and detection models': { bg: '#e0f7fa', color: '#00695c' },
+  'Conduct threat hunting activities': { bg: '#fce4ec', color: '#c62828' },
+  'Generate incident analysis reports': { bg: '#fff3e0', color: '#e65100' },
+  'Review audit trails and system activity logs': { bg: '#f9fbe7', color: '#558b2f' },
+  'Verify compliance with security policies': { bg: '#e3f2fd', color: '#1565c0' },
+  'Evaluate SIEM detection effectiveness': { bg: '#f3e5f5', color: '#4a148c' },
+  'Review generated reports and incident records': { bg: '#e8eaf6', color: '#1a237e' },
+  'Assess alert handling and response procedures': { bg: '#fffde7', color: '#827717' },
+  'Produce audit and compliance reports': { bg: '#e0f2f1', color: '#004d40' },
+  'Recommend security and governance improvements': { bg: '#fce4ec', color: '#ad1457' },
 };
 
 const StatCard = ({ icon, label, value, bg, color }) => (
@@ -49,9 +54,7 @@ const StatCard = ({ icon, label, value, bg, color }) => (
 );
 
 const formatDateTime = (value) => {
-  if (!value) return 'No login recorded';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? 'No login recorded' : date.toLocaleString();
+  return formatSharedDateTime(value, 'No login recorded');
 };
 
 const formatRelativeTime = (value) => {

@@ -1,0 +1,20 @@
+AUTH_DEFAULT_ROLE = 'System Administrator'
+ROLE_SYSTEM_ADMINISTRATOR = AUTH_DEFAULT_ROLE
+ROLE_SECURITY_ANALYST = 'Security Analyst'
+ROLE_SECURITY_AUDITOR = 'Security Auditor / Audit Manager'
+
+AUTH_ROLES = {
+    ROLE_SYSTEM_ADMINISTRATOR,
+    ROLE_SECURITY_ANALYST,
+    ROLE_SECURITY_AUDITOR,
+}
+
+AUTH_ROLE_ALIASES = {
+    'Security Administrator': ROLE_SECURITY_ANALYST,
+    'Auditor Management': ROLE_SECURITY_AUDITOR,
+    'Auditor': ROLE_SECURITY_AUDITOR,
+    'Audit Manager': ROLE_SECURITY_AUDITOR,
+    'Security Auditor': ROLE_SECURITY_AUDITOR,
+}
+
+DEFAULT_PROFILE_DEPARTMENT = 'Security Operations (SOC)'
